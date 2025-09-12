@@ -1,0 +1,350 @@
+import os
+from pathlib import Path
+import pandas as pd
+import streamlit as st
+
+# --- Config ---
+st.set_page_config(page_title='Route Search Tool', layout='wide')
+st.title('Route Search Tool')
+
+# Admin password (can also be set via environment variable for security)
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASS", "Delta01$")
+
+# Filenames (can be overridden via environment if using docker-compose)
+DATA_XLSX = os.environ.get("DATA_XLSX", "map1.xlsx")
+MASTER_CSV = os.environ.get("MASTER_CSV", "FinalSchedule_normalized.csv")
+
+DISPLAY_COLS = ['Dest', 'Origin', 'Freq', 'A/L', 'EQPT', 'Eff Date', 'Term Date']
+RENAME_MAP = {
+    'STA': 'Dest',
+    'PREV CITY': 'Origin',
+    'PREV  CITY': 'Origin',
+    'PREVCITY': 'Origin',
+    'EFF DATE': 'Eff Date',
+    'TERM DATE': 'Term Date',
+    'FREQ': 'Freq'
+}
+
+# ---------- Sidebar Status Box ----------
+def show_status_box():
+    """Display master CSV status in the sidebar."""
+    try:
+        if Path(MASTER_CSV).exists():
+            df_check = pd.read_csv(MASTER_CSV)
+            _rows = len(df_check)
+
+            bad_eff = df_check['Eff Date'].isna().sum() if 'Eff Date' in df_check.columns else 0
+            bad_term = df_check['Term Date'].isna().sum() if 'Term Date' in df_check.columns else 0
+
+            msg = f"📊 Master CSV loaded: {_rows} rows"
+            if bad_eff > 0 or bad_term > 0:
+                msg += f" | ⚠️ Unparsed dates → Eff Date: {bad_eff}, Term Date: {bad_term}"
+                st.sidebar.warning(msg)
+            else:
+                st.sidebar.info(msg)
+        else:
+            st.sidebar.warning("⚠️ Master CSV not found")
+    except Exception as e:
+        st.sidebar.error(f"Failed to read master CSV: {e}")
+
+# Show status box at startup
+show_status_box()
+
+# ---------- Utilities ----------
+def parse_dates(series: pd.Series) -> pd.Series:
+    """Safely parse dates in multiple formats (airline style first, then flexible)."""
+    parsed = pd.to_datetime(series, format='%d%b%y', errors='coerce')
+    mask = parsed.isna() & series.notna()
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(series.loc[mask], errors='coerce')
+    return parsed
+
+def ensure_display_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Guarantee all expected columns exist before reordering."""
+    for c in DISPLAY_COLS:
+        if c not in df.columns:
+            df[c] = pd.NA
+    return df[DISPLAY_COLS].copy()
+
+def clean_origin(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop rows where Origin is blank, NaN, or placeholder like 'None'."""
+    if 'Origin' in df.columns:
+        df['Origin'] = df['Origin'].astype(str).str.strip()
+        df = df[~df['Origin'].isin(['', 'nan', 'NaN', 'None', 'NONE'])]
+    return df
+
+def load_raw_excel(path: str) -> pd.DataFrame:
+    """Read first sheet, auto-detect header row containing STA & PREV CITY variants."""
+    xl = pd.ExcelFile(path)
+    sheet = xl.sheet_names[0]
+    raw = pd.read_excel(path, sheet_name=sheet, header=None)
+    header_idx = None
+    for i in range(min(25, len(raw))):
+        row_vals = raw.iloc[i].astype(str).str.strip().str.upper().tolist()
+        if ('STA' in row_vals) and (('PREV CITY' in row_vals) or ('PREV  CITY' in row_vals) or ('PREVCITY' in row_vals)):
+            header_idx = i
+            break
+    if header_idx is None:
+        header_idx = 0
+    df = pd.read_excel(path, sheet_name=sheet, header=header_idx)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+@st.cache_data(show_spinner=True)
+def get_display_df() -> pd.DataFrame:
+    """Load master CSV (or base Excel), normalize, and return display DataFrame."""
+    if Path(MASTER_CSV).exists():
+        df = pd.read_csv(MASTER_CSV)
+        if 'Eff Date' in df.columns:
+            df['Eff Date'] = parse_dates(df['Eff Date'])
+        if 'Term Date' in df.columns:
+            df['Term Date'] = parse_dates(df['Term Date'])
+        df = ensure_display_cols(df)
+        df = clean_origin(df)
+        return df
+    else:
+        if Path(DATA_XLSX).exists():
+            df = load_raw_excel(DATA_XLSX)
+            df = df.rename(columns=RENAME_MAP)
+            if 'Eff Date' in df.columns:
+                df['Eff Date'] = parse_dates(df['Eff Date'])
+            if 'Term Date' in df.columns:
+                df['Term Date'] = parse_dates(df['Term Date'])
+            df = ensure_display_cols(df)
+            df = clean_origin(df)
+            return df
+        else:
+            # Create empty master if nothing exists
+            base = pd.DataFrame(columns=DISPLAY_COLS)
+            base.to_csv(MASTER_CSV, index=False)
+            return base
+
+def read_uploaded_excel(file_like) -> pd.DataFrame:
+    """Read uploaded Excel, normalize headers and dates, ensure columns, clean Origin."""
+    xl = pd.ExcelFile(file_like)
+    sheet = xl.sheet_names[0]
+    temp = pd.read_excel(file_like, sheet_name=sheet, header=None)
+    header_idx = None
+    for i in range(min(25, len(temp))):
+        row_vals = temp.iloc[i].astype(str).str.strip().str.upper().tolist()
+        if ('STA' in row_vals) and (('PREV CITY' in row_vals) or ('PREV  CITY' in row_vals) or ('PREVCITY' in row_vals)):
+            header_idx = i
+            break
+    if header_idx is None:
+        header_idx = 0
+    df = pd.read_excel(file_like, sheet_name=sheet, header=header_idx)
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Robust header normalization
+    col_map = {}
+    for c in df.columns:
+        cname = str(c).strip().upper().replace("  ", " ")
+        if cname == "STA":
+            col_map[c] = "Dest"
+        elif cname in ["PREV CITY", "PREV  CITY", "PREVCITY"]:
+            col_map[c] = "Origin"
+        elif cname == "EFF DATE":
+            col_map[c] = "Eff Date"
+        elif cname == "TERM DATE":
+            col_map[c] = "Term Date"
+        elif cname == "FREQ":
+            col_map[c] = "Freq"
+        elif cname == "A/L":
+            col_map[c] = "A/L"
+        elif cname == "EQPT":
+            col_map[c] = "EQPT"
+
+    df = df.rename(columns=col_map)
+
+    # Ensure/parse
+    if 'Eff Date' in df.columns:
+        df['Eff Date'] = parse_dates(df['Eff Date'])
+    if 'Term Date' in df.columns:
+        df['Term Date'] = parse_dates(df['Term Date'])
+
+    df = ensure_display_cols(df)
+    df = clean_origin(df)
+    return df
+
+@st.cache_data(show_spinner=False)
+def make_key_ui(df: pd.DataFrame) -> pd.Series:
+    """Build a unique key from all display columns to detect full-row duplicates."""
+    temp = df.copy()
+    # normalize strings
+    for c in ['Dest','Origin','Freq','A/L','EQPT']:
+        if c in temp.columns:
+            temp[c] = temp[c].astype(str).str.strip()
+    # normalize dates to yyyy-mm-dd (string)
+    if 'Eff Date' in temp.columns:
+        temp['Eff Date'] = parse_dates(temp['Eff Date']).dt.strftime('%Y-%m-%d')
+    if 'Term Date' in temp.columns:
+        temp['Term Date'] = parse_dates(temp['Term Date']).dt.strftime('%Y-%m-%d')
+    key = (
+        temp['Dest'].fillna('').astype(str) + '|' +
+        temp['Origin'].fillna('').astype(str) + '|' +
+        temp['Freq'].fillna('').astype(str) + '|' +
+        temp['A/L'].fillna('').astype(str) + '|' +
+        temp['EQPT'].fillna('').astype(str) + '|' +
+        temp['Eff Date'].fillna('').astype(str) + '|' +
+        temp['Term Date'].fillna('').astype(str)
+    )
+    return key
+
+def handle_upload(upload) -> None:
+    """Process an uploaded Excel file: normalize, dedupe, append to master, and refresh status."""
+    try:
+        new_df = read_uploaded_excel(upload)
+        st.info('Upload parsed rows: ' + str(len(new_df)))
+        st.write(new_df.head())
+
+        # Load current master
+        master = pd.read_csv(MASTER_CSV) if Path(MASTER_CSV).exists() else pd.DataFrame(columns=DISPLAY_COLS)
+        if 'Eff Date' in master.columns:
+            master['Eff Date'] = parse_dates(master['Eff Date'])
+        if 'Term Date' in master.columns:
+            master['Term Date'] = parse_dates(master['Term Date'])
+        master = ensure_display_cols(master)
+        master = clean_origin(master)
+
+        # Dedupe by key
+        master_key = set(make_key_ui(master).tolist()) if len(master) > 0 else set()
+        new_key = make_key_ui(new_df)
+        mask_new = ~new_key.isin(master_key)
+        to_add = new_df[mask_new].copy()
+
+        st.info('New rows detected: ' + str(len(to_add)))
+        st.write(to_add.head())
+
+        if len(to_add) > 0:
+            combined = pd.concat([master, to_add], ignore_index=True)
+            # Save with normalized date strings
+            if 'Eff Date' in combined.columns:
+                combined['Eff Date'] = parse_dates(combined['Eff Date']).dt.strftime('%Y-%m-%d')
+            if 'Term Date' in combined.columns:
+                combined['Term Date'] = parse_dates(combined['Term Date']).dt.strftime('%Y-%m-%d')
+            combined = ensure_display_cols(combined)
+            combined = clean_origin(combined)
+            combined.to_csv(MASTER_CSV, index=False)
+            st.success(f'Added {len(to_add)} new records. Master CSV updated.')
+            st.info("✅ Please click '🔄 Restart App' in the sidebar to reload the updated database.")
+        else:
+            st.warning('No new records to add. Master may already contain these rows after normalization.')
+            st.info("If you believe new data should be visible, click '🔄 Restart App' in the sidebar to force reload.")
+
+        # Refresh the sidebar status box dynamically
+        show_status_box()
+
+    except Exception as e:
+        st.error('Upload failed: ' + str(e))
+
+def handle_clear_all(confirm: bool, trigger: bool) -> None:
+    """Clear master CSV back to headers only when confirmed."""
+    if trigger and confirm:
+        try:
+            pd.DataFrame(columns=DISPLAY_COLS).to_csv(MASTER_CSV, index=False)
+            st.sidebar.success('All data cleared. Master reset to headers only.')
+            # Update sidebar status immediately
+            show_status_box()
+        except Exception as e:
+            st.sidebar.error('Failed to clear data: ' + str(e))
+
+# ---------- Main App ----------
+data = get_display_df()
+
+# Build filter options once
+orig_options = sorted([x for x in data['Origin'].dropna().astype(str).unique().tolist() if len(x) > 0])
+dest_options = sorted([x for x in data['Dest'].dropna().astype(str).unique().tolist() if len(x) > 0])
+eqpt_options = sorted([x for x in data['EQPT'].dropna().astype(str).unique().tolist() if len(x) > 0])
+
+# Sidebar
+st.sidebar.header('Filters')
+
+# Session state for filters
+if "sel_origs" not in st.session_state: st.session_state["sel_origs"] = []
+if "sel_dests" not in st.session_state: st.session_state["sel_dests"] = []
+if "sel_eqpts" not in st.session_state: st.session_state["sel_eqpts"] = []
+
+# 1. Date
+sel_date = st.sidebar.date_input('Select Date', value=pd.Timestamp.today().date())
+
+# 2. Origin
+sel_origs = st.sidebar.multiselect('Filter Origin (optional)', orig_options, default=st.session_state["sel_origs"])
+# 3. Dest
+sel_dests = st.sidebar.multiselect('Filter Dest (optional)', dest_options, default=st.session_state["sel_dests"])
+# 4. EQPT
+sel_eqpts = st.sidebar.multiselect('Filter EQPT (optional)', eqpt_options, default=st.session_state["sel_eqpts"])
+
+# Save filters
+st.session_state["sel_origs"] = sel_origs
+st.session_state["sel_dests"] = sel_dests
+st.session_state["sel_eqpts"] = sel_eqpts
+
+# Reset button
+if st.sidebar.button("Reset Filters"):
+    st.session_state["sel_origs"] = []
+    st.session_state["sel_dests"] = []
+    st.session_state["sel_eqpts"] = []
+    st.rerun()
+
+# --- Restart App (available to all users) ---
+if st.sidebar.button("🔄 Restart App"):
+    st.rerun()
+
+# --- Admin Section ---
+st.sidebar.markdown("---")
+
+if "is_admin" not in st.session_state:
+    st.session_state["is_admin"] = False
+
+if st.session_state["is_admin"]:
+    st.sidebar.success("✅ Admin mode enabled")
+    if st.sidebar.button("Logout Admin"):
+        st.session_state["is_admin"] = False
+        st.rerun()
+
+    # Upload
+    st.sidebar.header('Upload New Excel')
+    upload = st.sidebar.file_uploader('Upload Excel', type=['xlsx','xls'])
+    if upload is not None:
+        handle_upload(upload)
+
+    # Maintenance
+    st.sidebar.markdown('---')
+    st.sidebar.subheader('Maintenance')
+    _confirm_clear = st.sidebar.checkbox('Confirm delete all data')
+    _btn_clear_all = st.sidebar.button('Clear All Data')
+    handle_clear_all(_confirm_clear, _btn_clear_all)
+else:
+    admin_pass = st.sidebar.text_input("Admin Password", type="password")
+    if admin_pass == ADMIN_PASSWORD:
+        st.session_state["is_admin"] = True
+        st.rerun()
+    else:
+        st.sidebar.error("🔒 Admin mode locked — enter password to access upload & maintenance")
+
+# --- Filtering + Display ---
+df = data.copy()
+sel_ts = pd.Timestamp(sel_date)
+
+if 'Eff Date' in df.columns and 'Term Date' in df.columns:
+    df['Eff Date'] = parse_dates(df['Eff Date'])
+    df['Term Date'] = parse_dates(df['Term Date'])
+    mask_date = (
+        (df['Eff Date'].notna()) &
+        (df['Term Date'].notna()) &
+        (df['Eff Date'] <= sel_ts) &
+        (df['Term Date'] >= sel_ts)
+    )
+    df = df[mask_date]
+
+if len(sel_dests) > 0:
+    df = df[df['Dest'].astype(str).isin(sel_dests)]
+if len(sel_origs) > 0:
+    df = df[df['Origin'].astype(str).isin(sel_origs)]
+if len(sel_eqpts) > 0:
+    df = df[df['EQPT'].astype(str).isin(sel_eqpts)]
+
+st.subheader('Filtered Results')
+st.write('Date: ' + str(sel_date) + ' | Rows: ' + str(len(df)))
+st.dataframe(df, width='stretch')
+st.caption('Showing only columns: Dest, Origin, Freq, A/L, EQPT, Eff Date, Term Date')
