@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import pandas as pd
 import streamlit as st
+import pydeck as pdk
 
 # --- Config ---
 st.set_page_config(page_title='Route Search Tool', layout='wide')
@@ -217,7 +218,7 @@ st.write(f'Date: {sel_date} | Rows: {len(df)}')
 st.dataframe(df, width='stretch')
 st.caption('Showing only columns: Dest, Origin, Freq, A/L, EQPT, Eff Date, Term Date')
 
-# ---------- Map of Unique Destinations ----------
+# ---------- Map of Unique Destinations (with tooltips) ----------
 try:
     ref_path = "map1.xlsx"  # adjust if needed
     ref_df = pd.read_excel(ref_path, sheet_name=0)
@@ -231,7 +232,29 @@ try:
 
     st.subheader("Destination Map")
     if not dest_locations.empty:
-        st.map(dest_locations)
+        layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=dest_locations,
+            get_position='[lon, lat]',
+            get_radius=40000,
+            get_fill_color=[0, 128, 255, 180],
+            pickable=True,
+        )
+
+        view_state = pdk.ViewState(
+            latitude=float(dest_locations["lat"].mean()),
+            longitude=float(dest_locations["lon"].mean()),
+            zoom=3,
+            pitch=0,
+        )
+
+        r = pdk.Deck(
+            layers=[layer],
+            initial_view_state=view_state,
+            tooltip={"text": "{Dest}"}
+        )
+
+        st.pydeck_chart(r)
     else:
         st.info("⚠️ No matching coordinates found for current destinations.")
 except Exception as e:
