@@ -41,8 +41,8 @@ if st.sidebar.button("🚪 Logout"):
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASS", "Delta01$")
 
 # Filenames
-DATA_XLSX = os.environ.get("DATA_XLSX", "map1.xlsx")
 MASTER_CSV = os.environ.get("MASTER_CSV", "FinalSchedule_normalized.csv")
+IATA_CSV = os.environ.get("IATA_CSV", "iata_latlong.csv")
 
 DISPLAY_COLS = ['Dest', 'Origin', 'Freq', 'A/L', 'EQPT', 'Eff Date', 'Term Date']
 RENAME_MAP = {
@@ -218,32 +218,30 @@ st.write(f'Date: {sel_date} | Rows: {len(df)}')
 st.dataframe(df, width='stretch')
 st.caption('Showing only columns: Dest, Origin, Freq, A/L, EQPT, Eff Date, Term Date')
 
-# ---------- Map of Unique Destinations (with tooltips) ----------
+# ---------- Map of Unique Destinations (with CSV lookup + tooltips) ----------
 try:
-    ref_path = "map1.xlsx"  # adjust if needed
-    ref_df = pd.read_excel(ref_path, sheet_name=0)
+    ref_df = pd.read_csv(IATA_CSV)
 
     # Normalize column names
     ref_df.columns = [c.strip() for c in ref_df.columns]
-    ref_df = ref_df.rename(columns={"IATA Code": "Dest", "LAT": "lat", "LONG": "lon"})
 
-    # Merge unique destinations with reference lat/lon
-    dest_locations = ref_df[ref_df["Dest"].isin(unique_dests)][["Dest", "lat", "lon"]].dropna()
+    # Merge unique destinations with lat/long
+    dest_locations = ref_df[ref_df["Dest"].isin(unique_dests)][["Dest", "Lat", "Long"]].dropna()
 
     st.subheader("Destination Map")
     if not dest_locations.empty:
         layer = pdk.Layer(
             "ScatterplotLayer",
             data=dest_locations,
-            get_position='[lon, lat]',
+            get_position='[Long, Lat]',
             get_radius=40000,
             get_fill_color=[0, 128, 255, 180],
             pickable=True,
         )
 
         view_state = pdk.ViewState(
-            latitude=float(dest_locations["lat"].mean()),
-            longitude=float(dest_locations["lon"].mean()),
+            latitude=float(dest_locations["Lat"].mean()),
+            longitude=float(dest_locations["Long"].mean()),
             zoom=3,
             pitch=0,
         )
