@@ -1,0 +1,14 @@
+# OS / editor files
+.DS_Store
+Thumbs.db
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+env/
+venv/
+
+# Streamlit cache
+.streamlit/
