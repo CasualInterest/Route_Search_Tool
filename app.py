@@ -216,3 +216,23 @@ st.subheader('Filtered Results')
 st.write(f'Date: {sel_date} | Rows: {len(df)}')
 st.dataframe(df, width='stretch')
 st.caption('Showing only columns: Dest, Origin, Freq, A/L, EQPT, Eff Date, Term Date')
+
+# ---------- Map of Unique Destinations ----------
+try:
+    ref_path = "map1.xlsx"  # adjust if needed
+    ref_df = pd.read_excel(ref_path, sheet_name=0)
+
+    # Normalize column names
+    ref_df.columns = [c.strip() for c in ref_df.columns]
+    ref_df = ref_df.rename(columns={"IATA Code": "Dest", "LAT": "lat", "LONG": "lon"})
+
+    # Merge unique destinations with reference lat/lon
+    dest_locations = ref_df[ref_df["Dest"].isin(unique_dests)][["Dest", "lat", "lon"]].dropna()
+
+    st.subheader("Destination Map")
+    if not dest_locations.empty:
+        st.map(dest_locations)
+    else:
+        st.info("⚠️ No matching coordinates found for current destinations.")
+except Exception as e:
+    st.error(f"Map could not be generated: {e}")
