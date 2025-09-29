@@ -283,6 +283,23 @@ def handle_clear_all(confirm: bool, trigger: bool) -> None:
         except Exception as e:
             st.sidebar.error('Failed to clear data: ' + str(e))
 
+def restore_latest_backup():
+    try:
+        backups_dir = Path('backups')
+        if not backups_dir.exists():
+            st.sidebar.error('No backups folder found.')
+            return
+        backups = sorted(backups_dir.glob('FinalSchedule_normalized_*.csv'))
+        if not backups:
+            st.sidebar.error('No backup files found.')
+            return
+        latest = backups[-1]
+        shutil.copy(latest, MASTER_CSV)
+        st.sidebar.success(f'Restored: {latest.name} → {MASTER_CSV}')
+        restart_app(full_reset=True)
+    except Exception as e:
+        st.sidebar.error('Restore failed: ' + str(e))
+
 
 
 # ---------- MAP Merge Utilities (added) ----------
@@ -385,6 +402,8 @@ if st.session_state["is_admin"]:
 
     st.sidebar.markdown('---')
     st.sidebar.subheader('Maintenance')
+    if st.sidebar.button('⏪ Restore latest backup', use_container_width=True):
+        restore_latest_backup()
     _confirm_clear = st.sidebar.checkbox('Confirm delete all data')
     _btn_clear_all = st.sidebar.button('Clear All Data')
     handle_clear_all(_confirm_clear, _btn_clear_all)
