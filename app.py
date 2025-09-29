@@ -241,6 +241,28 @@ def merge_override(master_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFram
     combined = combined.sort_values(by=DISPLAY_COLS, kind='mergesort', ignore_index=True)
     return combined
 
+# ---- Fleet categorization ----
+def categorize_fleet(eqpt: str) -> str:
+    if pd.isna(eqpt):
+        return "Other"
+    eqpt = str(eqpt).strip().upper()
+    if eqpt in ["75C","75D","76K","75S","75H","75Y","75G","76L","76Z","764","76Q","75Q"]:
+        return "757/767"
+    elif eqpt in ["739","738","73R","73J"]:
+        return "737"
+    elif eqpt in ["319","320","321","3N1","3NE","32D"]:
+        return "320"
+    elif eqpt in ["CM7","CM8","CM9","E70","E75","EA4","ES4","ES5","RJ6","RJ8","RJ9","RP5"]:
+        return "RJ"
+    elif eqpt in ["221","223"]:
+        return "220"
+    elif eqpt.startswith("35"):
+        return "350"
+    elif eqpt.startswith("33"):
+        return "330"
+    else:
+        return eqpt  # pass through ungrouped types like 717/71Q
+
 # =========================
 # Simple Password Gate
 # =========================
@@ -283,24 +305,33 @@ st.sidebar.header('Filters')
 if "sel_origs" not in st.session_state: st.session_state["sel_origs"] = []
 if "sel_dests" not in st.session_state: st.session_state["sel_dests"] = []
 if "sel_eqpts" not in st.session_state: st.session_state["sel_eqpts"] = []
+if "sel_fleets" not in st.session_state: st.session_state["sel_fleets"] = []
 
 sel_date = st.sidebar.date_input('Select Date', value=pd.Timestamp.today().date())
 orig_options = sorted([x for x in data['Origin'].dropna().astype(str).unique().tolist() if len(x) > 0])
 dest_options = sorted([x for x in data['Dest'].dropna().astype(str).unique().tolist() if len(x) > 0])
 eqpt_options = sorted([x for x in data['EQPT'].dropna().astype(str).unique().tolist() if len(x) > 0])
 
+# Build Fleet options from data to ensure only present fleets appear
+fleet_options = sorted(data['EQPT'].dropna().astype(str).apply(categorize_fleet).unique().tolist())
+
 sel_origs = st.sidebar.multiselect('Filter Origin (optional)', orig_options, default=st.session_state["sel_origs"])
 sel_dests = st.sidebar.multiselect('Filter Dest (optional)', dest_options, default=st.session_state["sel_dests"])
+
+# NEW: Fleet filter (multi-select), placed above EQPT
+sel_fleets = st.sidebar.multiselect('Filter Fleet (optional)', fleet_options, default=st.session_state["sel_fleets"])
 sel_eqpts = st.sidebar.multiselect('Filter EQPT (optional)', eqpt_options, default=st.session_state["sel_eqpts"])
 
 st.session_state["sel_origs"] = sel_origs
 st.session_state["sel_dests"] = sel_dests
 st.session_state["sel_eqpts"] = sel_eqpts
+st.session_state["sel_fleets"] = sel_fleets
 
 if st.sidebar.button("Reset Filters"):
     st.session_state["sel_origs"] = []
     st.session_state["sel_dests"] = []
     st.session_state["sel_eqpts"] = []
+    st.session_state["sel_fleets"] = []
     st.rerun()
 
 # Safer restart
@@ -385,6 +416,9 @@ else:
 df = data.copy()
 sel_ts = pd.Timestamp(sel_date)
 
+# Build Fleet column once for filtering and display
+df["Fleet"] = df["EQPT"].apply(categorize_fleet)
+
 if 'Eff Date' in df.columns and 'Term Date' in df.columns:
     df['Eff Date'] = parse_dates(df['Eff Date'])
     df['Term Date'] = parse_dates(df['Term Date'])
@@ -400,6 +434,12 @@ if len(sel_dests) > 0:
     df = df[df['Dest'].astype(str).isin(sel_dests)]
 if len(sel_origs) > 0:
     df = df[df['Origin'].astype(str).isin(sel_origs)]
+
+# Apply Fleet filter BEFORE EQPT (so EQPT is optional & subordinate)
+if len(sel_fleets) > 0:
+    df = df[df["Fleet"].isin(sel_fleets)]
+
+# Optional EQPT filter
 if len(sel_eqpts) > 0:
     df = df[df['EQPT'].astype(str).isin(sel_eqpts)]
 
@@ -449,8 +489,13 @@ unique_list = render_unique_dest_table(df, n_cols=7, height=220)
 # =========================
 st.subheader('Filtered Results')
 st.write(f"Date: {sel_date} | Rows: {len(df)}")
-st.dataframe(df, use_container_width=True, height=420)
-st.caption('Showing only columns: Dest, Origin, Freq, A/L, EQPT, Eff Date, Term Date')
+# Show Fleet column alongside core columns
+show_cols = ['Dest', 'Origin', 'Freq', 'A/L', 'EQPT', 'Fleet', 'Eff Date', 'Term Date']
+for c in show_cols:
+    if c not in df.columns:
+        df[c] = pd.NA
+st.dataframe(df[show_cols], use_container_width=True, height=420)
+st.caption('Showing: Dest, Origin, Freq, A/L, EQPT, Fleet, Eff Date, Term Date')
 
 # =========================
 # Map of Unique Destinations
