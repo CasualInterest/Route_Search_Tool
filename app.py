@@ -1,11 +1,33 @@
 import os
 from pathlib import Path
 import pandas as pd
+import shutil
 import streamlit as st
 
 # --- Config ---
 st.set_page_config(page_title='Route Search Tool', layout='wide')
 st.title('Route Search Tool')
+
+# --- Restart Helper ---
+def restart_app(full_reset: bool = True):
+    # Clear Streamlit caches
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+    try:
+        st.cache_resource.clear()
+    except Exception:
+        pass
+    # Optionally clear session state to reset filters/UI
+    if full_reset:
+        for k in list(st.session_state.keys()):
+            try:
+                del st.session_state[k]
+            except Exception:
+                pass
+    st.rerun()
+
 
 # --- Simple Password Gate ---
 login_placeholder = st.empty()
@@ -231,6 +253,16 @@ def handle_upload(upload) -> None:
                 combined['Term Date'] = parse_dates(combined['Term Date']).dt.strftime('%Y-%m-%d')
             combined = ensure_display_cols(combined)
             combined = clean_origin(combined)
+            try:
+                # Backup current master before overwriting
+                if Path(MASTER_CSV).exists():
+                    backups_dir = Path('backups')
+                    backups_dir.mkdir(exist_ok=True)
+                    ts = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+                    backup_path = backups_dir / f'FinalSchedule_normalized_{ts}.csv'
+                    shutil.copy(MASTER_CSV, backup_path)
+            except Exception as _bkp_err:
+                st.sidebar.warning(f'Backup skipped: {_bkp_err}')
             combined.to_csv(MASTER_CSV, index=False)
             st.success(f'Added {len(to_add)} new records. Master CSV updated.')
             st.info("✅ Please click '🔄 Restart App' in the sidebar to reload the updated database.")
@@ -334,7 +366,7 @@ if st.sidebar.button("Reset Filters"):
     st.rerun()
 
 if st.sidebar.button("🔄 Restart App"):
-    st.rerun()
+    restart_app(full_reset=True)
 
 st.sidebar.markdown("---")
 if "is_admin" not in st.session_state:
