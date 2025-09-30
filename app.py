@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import pydeck as pdk
+from datetime import datetime
 
 # =========================
 # Config
@@ -94,6 +95,23 @@ def load_raw_excel(path: str) -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name=sheet, header=header_idx)
     df.columns = [str(c).strip() for c in df.columns]
     return df
+
+def _fmt_ts(ts: float) -> str:
+    # Render local time in a concise friendly format
+    try:
+        return datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M')
+    except Exception:
+        return ''
+
+def _last_updated_text(filepath: str) -> str:
+    try:
+        p = Path(filepath)
+        if p.exists():
+            mtime = p.stat().st_mtime
+            return _fmt_ts(mtime)
+    except Exception:
+        pass
+    return '—'
 
 @st.cache_data(show_spinner=True)
 def get_display_df() -> pd.DataFrame:
@@ -298,7 +316,7 @@ if st.sidebar.button('🚪 Logout'):
     st.rerun()
 
 # =========================
-# Status box (counts only truly non-empty unparsed dates)
+# Status box + Last updated
 # =========================
 def show_status_box():
     try:
@@ -313,6 +331,9 @@ def show_status_box():
                 t = _to_na(raw['Term Date'])
                 term_bad = t.notna().sum() - parse_any_date(t).notna().sum()
             msg = f'📊 Master CSV loaded: {rows:,} rows'
+            last = _last_updated_text(MASTER_CSV)
+            if last and last != '—':
+                msg += f' • Last updated: {last}'
             if eff_bad > 0 or term_bad > 0:
                 msg += f' | ⚠️ Unparsed dates → Eff Date: {eff_bad}, Term Date: {term_bad}'
                 st.sidebar.warning(msg)
@@ -438,7 +459,7 @@ if st.session_state['is_admin']:
         except Exception as e:
             st.sidebar.error(f'Clean failed: {e}')
 
-    # --- Clear All Data now also runs cleaner (as last step) ---
+    # --- Clear All Data runs cleaner (last step) ---
     _confirm_clear = st.sidebar.checkbox('Confirm delete all data')
     _btn_clear_all = st.sidebar.button('Clear All Data')
     if _btn_clear_all and _confirm_clear:
