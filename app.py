@@ -402,7 +402,7 @@ if st.session_state['is_admin']:
                 errors.append(f"{getattr(up,'name','file')}: {e}")
 
         if errors:
-            st.sidebar.error("Some files failed:\\n" + "\\n".join(errors))
+            st.sidebar.error("Some files failed:\n" + "\n".join(errors))
 
         if parts:
             incoming = pd.concat(parts, ignore_index=True)
@@ -424,7 +424,6 @@ if st.session_state['is_admin']:
     if st.sidebar.button('⏪ Restore latest backup', use_container_width=True):
         restore_latest_backup()
 
-    # NEW: One-click master cleaner
     if st.sidebar.button('🧹 Clean & normalize master (drop invalid dates/origin)', use_container_width=True):
         try:
             backup_master()
@@ -439,15 +438,24 @@ if st.session_state['is_admin']:
         except Exception as e:
             st.sidebar.error(f'Clean failed: {e}')
 
+    # --- Clear All Data now also runs cleaner (as last step) ---
     _confirm_clear = st.sidebar.checkbox('Confirm delete all data')
     _btn_clear_all = st.sidebar.button('Clear All Data')
     if _btn_clear_all and _confirm_clear:
         try:
+            # 1) Backup current master
+            backup_master()
+            # 2) Write empty master with headers only
             pd.DataFrame(columns=DISPLAY_COLS).to_csv(MASTER_CSV, index=False)
-            st.sidebar.success('All data cleared. Master reset to headers only.')
+            # 3) Run the cleaner (no-op on empty, but ensures normalization pipeline executes)
+            raw = pd.read_csv(MASTER_CSV, dtype=str) if Path(MASTER_CSV).exists() else pd.DataFrame(columns=DISPLAY_COLS)
+            cleaned, _drop_total, _drop_dates, _drop_origin = clean_master_df(raw)
+            cleaned.to_csv(MASTER_CSV, index=False)
+            st.sidebar.success('All data cleared and master normalized.')
             restart_app(full_reset=True)
         except Exception as e:
-            st.sidebar.error('Failed to clear data: ' + str(e))
+            st.sidebar.error('Failed to clear & normalize: ' + str(e))
+
 else:
     admin_pass = st.sidebar.text_input('Admin Password', type='password')
     if admin_pass == ADMIN_PASSWORD:
