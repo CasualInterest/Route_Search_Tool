@@ -1,4 +1,3 @@
-
 import os
 from pathlib import Path
 import shutil
@@ -16,6 +15,8 @@ MASTER_CSV = os.environ.get("MASTER_CSV", "FinalSchedule_normalized.csv")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASS", "Delta01$")
 DATA_XLSX = os.environ.get("DATA_XLSX", "map1.xlsx")  # only used if master missing
 IATA_LATLONG_CSV = os.environ.get("IATA_LATLONG_CSV", "iata_latlong.csv")
+BACKUP_DIR = Path("backups")
+ROLLING_BACKUP = BACKUP_DIR / "FinalSchedule_backup.csv"
 
 DISPLAY_COLS = ['Dest', 'Origin', 'Freq', 'A/L', 'EQPT', 'Eff Date', 'Term Date']
 FLEET_ALLOWED = ['220','320','737','757/767','764','330','350','717','RJ','Other']
@@ -43,7 +44,6 @@ def restart_app(full_reset: bool = True):
     st.rerun()
 
 def _to_na(s: pd.Series) -> pd.Series:
-    """Treat '', 'nan', 'NaN', 'None' as NA for status math."""
     return (
         s.astype(str)
          .str.strip()
@@ -51,15 +51,11 @@ def _to_na(s: pd.Series) -> pd.Series:
     )
 
 def parse_any_date(series: pd.Series) -> pd.Series:
-    """Robust date parser: 12SEP25, 2025-09-12, 9/12/2025, Excel serials."""
     s = _to_na(series)
-    # 1) ddMMMyy like 12SEP25
     dt = pd.to_datetime(s, format='%d%b%y', errors='coerce')
-    # 2) generic parse
     m = dt.isna()
     if m.any():
         dt.loc[m] = pd.to_datetime(s.loc[m], errors='coerce', dayfirst=False, infer_datetime_format=True)
-    # 3) Excel serials
     m = dt.isna()
     if m.any():
         as_num = pd.to_numeric(s.loc[m], errors='coerce')
@@ -97,7 +93,6 @@ def load_raw_excel(path: str) -> pd.DataFrame:
     return df
 
 def _fmt_ts(ts: float) -> str:
-    # Render local time in a concise friendly format
     try:
         return datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M')
     except Exception:
@@ -152,7 +147,6 @@ def get_display_df() -> pd.DataFrame:
             return base
 
 def read_map_upload(file_like) -> pd.DataFrame:
-    """Read uploaded MAP .xlsx/.csv, skip first 4 rows. Skip rows with blank/invalid dates or blank Origin."""
     name = getattr(file_like, 'name', '').lower()
     if name.endswith('.xlsx') or name.endswith('.xls'):
         df = pd.read_excel(file_like, header=0, skiprows=4, dtype=str, engine='openpyxl')
@@ -177,19 +171,13 @@ def read_map_upload(file_like) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     df = df.rename(columns={c: mapping.get(c, c) for c in df.columns})
     df = ensure_display_cols(df)
-
-    # Strip text
     for c in ['Dest','Origin','Freq','A/L','EQPT']:
         df[c] = df[c].astype(str).str.strip()
-
-    # Robust dates
     eff = parse_any_date(df['Eff Date'])
     term = parse_any_date(df['Term Date'])
-
     origin_ok = df['Origin'].astype(str).str.strip().ne('')
     dates_ok = eff.notna() & term.notna()
     keep_mask = dates_ok & origin_ok
-
     dropped_dates = int((~dates_ok).sum())
     dropped_origin = int((~origin_ok).sum())
     dropped_total = int((~keep_mask).sum())
@@ -198,7 +186,6 @@ def read_map_upload(file_like) -> pd.DataFrame:
             f"Dropped {dropped_total} rows from {getattr(file_like,'name','file')} "
             f"(invalid/missing dates: {dropped_dates}, blank origin: {dropped_origin})."
         )
-
     df = df.loc[keep_mask].copy()
     df['Eff Date'] = eff.loc[keep_mask].dt.strftime('%Y-%m-%d')
     df['Term Date'] = term.loc[keep_mask].dt.strftime('%Y-%m-%d')
@@ -206,30 +193,21 @@ def read_map_upload(file_like) -> pd.DataFrame:
 
 def backup_master():
     try:
+        BACKUP_DIR.mkdir(exist_ok=True)
         if Path(MASTER_CSV).exists():
-            backups_dir = Path('backups')
-            backups_dir.mkdir(exist_ok=True)
-            ts = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-            backup_path = backups_dir / f'FinalSchedule_normalized_{ts}.csv'
-            shutil.copy(MASTER_CSV, backup_path)
-            return backup_path
+            shutil.copy(MASTER_CSV, ROLLING_BACKUP)
+            return ROLLING_BACKUP
     except Exception as e:
         st.sidebar.warning(f'Backup skipped: {e}')
     return None
 
 def restore_latest_backup():
     try:
-        backups_dir = Path('backups')
-        if not backups_dir.exists():
-            st.sidebar.error('No backups folder found.')
+        if not ROLLING_BACKUP.exists():
+            st.sidebar.error('No rolling backup found.')
             return
-        backups = sorted(backups_dir.glob('FinalSchedule_normalized_*.csv'))
-        if not backups:
-            st.sidebar.error('No backup files found.')
-            return
-        latest = backups[-1]
-        shutil.copy(latest, MASTER_CSV)
-        st.sidebar.success(f'Restored: {latest.name} → {MASTER_CSV}')
+        shutil.copy(ROLLING_BACKUP, MASTER_CSV)
+        st.sidebar.success(f'Restored rolling backup → {MASTER_CSV}')
         restart_app(full_reset=True)
     except Exception as e:
         st.sidebar.error('Restore failed: ' + str(e))
@@ -241,7 +219,6 @@ def merge_override(master_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFram
     combined = combined.sort_values(by=DISPLAY_COLS, kind='mergesort', ignore_index=True)
     return combined
 
-# ---- Fleet categorization ----
 def map_to_fleet(eqpt: str) -> str:
     if pd.isna(eqpt):
         return 'Other'
@@ -267,10 +244,8 @@ def map_to_fleet(eqpt: str) -> str:
     else:
         return 'Other'
 
-# ---- Cleaner for MASTER ----
 def clean_master_df(df: pd.DataFrame):
     df = ensure_display_cols(df)
-    # strip text cols
     for c in ['Dest','Origin','Freq','A/L','EQPT']:
         df[c] = df[c].astype(str).str.strip()
     eff = parse_any_date(df['Eff Date'])
@@ -278,14 +253,14 @@ def clean_master_df(df: pd.DataFrame):
     origin_ok = df['Origin'].astype(str).str.strip().ne('')
     dates_ok = eff.notna() & term.notna()
     keep = dates_ok & origin_ok
-    dropped_dates = int((~dates_ok).sum())
-    dropped_origin = int((~origin_ok).sum())
-    dropped_total = int((~keep).sum())
     cleaned = df.loc[keep].copy()
     cleaned['Eff Date'] = eff.loc[keep].dt.strftime('%Y-%m-%d')
     cleaned['Term Date'] = term.loc[keep].dt.strftime('%Y-%m-%d')
     cleaned = cleaned.drop_duplicates(subset=DISPLAY_COLS, keep='last')
     cleaned = cleaned.sort_values(by=DISPLAY_COLS, kind='mergesort', ignore_index=True)
+    dropped_dates = int((~dates_ok).sum())
+    dropped_origin = int((~origin_ok).sum())
+    dropped_total = int((~keep).sum())
     return cleaned, dropped_total, dropped_dates, dropped_origin
 
 # =========================
@@ -316,26 +291,22 @@ if st.sidebar.button('🚪 Logout'):
     st.rerun()
 
 # =========================
-# Status box + Last updated
+# Sidebar status (rows + last updated + backup presence)
 # =========================
 def show_status_box():
     try:
         if Path(MASTER_CSV).exists():
             raw = pd.read_csv(MASTER_CSV, dtype=str)
             rows = len(raw)
-            eff_bad = term_bad = 0
-            if 'Eff Date' in raw.columns:
-                e = _to_na(raw['Eff Date'])
-                eff_bad = e.notna().sum() - parse_any_date(e).notna().sum()
-            if 'Term Date' in raw.columns:
-                t = _to_na(raw['Term Date'])
-                term_bad = t.notna().sum() - parse_any_date(t).notna().sum()
-            msg = f'📊 Master CSV loaded: {rows:,} rows'
+            e = _to_na(raw['Eff Date']) if 'Eff Date' in raw.columns else pd.Series([], dtype=str)
+            t = _to_na(raw['Term Date']) if 'Term Date' in raw.columns else pd.Series([], dtype=str)
+            eff_bad = e.notna().sum() - parse_any_date(e).notna().sum() if len(e) else 0
+            term_bad = t.notna().sum() - parse_any_date(t).notna().sum() if len(t) else 0
             last = _last_updated_text(MASTER_CSV)
-            if last and last != '—':
-                msg += f' • Last updated: {last}'
+            backup_state = "✅ Backup available" if ROLLING_BACKUP.exists() else "⚠️ No backup yet"
+            msg = f'📊 {rows:,} rows • Last updated: {last} • {backup_state}'
             if eff_bad > 0 or term_bad > 0:
-                msg += f' | ⚠️ Unparsed dates → Eff Date: {eff_bad}, Term Date: {term_bad}'
+                msg += f' | ⚠️ Unparsed dates → Eff: {eff_bad}, Term: {term_bad}'
                 st.sidebar.warning(msg)
             else:
                 st.sidebar.info(msg)
@@ -348,13 +319,11 @@ show_status_box()
 data = get_display_df()
 
 # =========================
-# Sidebar Filters
+# Filters
 # =========================
 st.sidebar.header('Filters')
-if 'sel_origs' not in st.session_state: st.session_state['sel_origs'] = []
-if 'sel_dests' not in st.session_state: st.session_state['sel_dests'] = []
-if 'sel_eqpts' not in st.session_state: st.session_state['sel_eqpts'] = []
-if 'sel_fleets' not in st.session_state: st.session_state['sel_fleets'] = []
+for key in ['sel_origs','sel_dests','sel_eqpts','sel_fleets']:
+    if key not in st.session_state: st.session_state[key] = []
 
 sel_date = st.sidebar.date_input('Select Date', value=pd.Timestamp.today().date())
 orig_options = sorted([x for x in data['Origin'].dropna().astype(str).unique().tolist() if len(x) > 0])
@@ -376,17 +345,15 @@ st.session_state['sel_eqpts'] = sel_eqpts
 st.session_state['sel_fleets'] = sel_fleets
 
 if st.sidebar.button('Reset Filters'):
-    st.session_state['sel_origs'] = []
-    st.session_state['sel_dests'] = []
-    st.session_state['sel_eqpts'] = []
-    st.session_state['sel_fleets'] = []
+    for key in ['sel_origs','sel_dests','sel_eqpts','sel_fleets']:
+        st.session_state[key] = []
     st.rerun()
 
 if st.sidebar.button('🔄 Restart App', use_container_width=True):
     restart_app(full_reset=True)
 
 # =========================
-# Admin section
+# Admin
 # =========================
 st.sidebar.markdown('---')
 if 'is_admin' not in st.session_state:
@@ -423,18 +390,17 @@ if st.session_state['is_admin']:
                 errors.append(f"{getattr(up,'name','file')}: {e}")
 
         if errors:
-            st.sidebar.error("Some files failed:\n" + "\n".join(errors))
+            st.sidebar.error("Some files failed:
+" + "
+".join(errors))
 
         if parts:
             incoming = pd.concat(parts, ignore_index=True)
             merged = merge_override(master, incoming)
-
-            # Extra safety: clean merged before saving
             cleaned, dropped_total, dropped_dates, dropped_origin = clean_master_df(merged)
             if dropped_total > 0:
                 st.sidebar.warning(f'Post-merge cleanup dropped {dropped_total} rows (invalid/missing dates: {dropped_dates}, blank origin: {dropped_origin}).')
             cleaned.to_csv(MASTER_CSV, index=False)
-
             st.sidebar.success(f'Merge complete. Rows now: {len(cleaned):,}')
             restart_app(full_reset=True)
         else:
@@ -448,10 +414,7 @@ if st.session_state['is_admin']:
     if st.sidebar.button('🧹 Clean & normalize master (drop invalid dates/origin)', use_container_width=True):
         try:
             backup_master()
-            if Path(MASTER_CSV).exists():
-                raw = pd.read_csv(MASTER_CSV, dtype=str)
-            else:
-                raw = pd.DataFrame(columns=DISPLAY_COLS)
+            raw = pd.read_csv(MASTER_CSV, dtype=str) if Path(MASTER_CSV).exists() else pd.DataFrame(columns=DISPLAY_COLS)
             cleaned, dropped_total, dropped_dates, dropped_origin = clean_master_df(raw)
             cleaned.to_csv(MASTER_CSV, index=False)
             st.sidebar.success(f'Cleaned master. Dropped {dropped_total} rows (invalid/missing dates: {dropped_dates}, blank origin: {dropped_origin}). Now {len(cleaned):,} rows.')
@@ -459,16 +422,12 @@ if st.session_state['is_admin']:
         except Exception as e:
             st.sidebar.error(f'Clean failed: {e}')
 
-    # --- Clear All Data runs cleaner (last step) ---
     _confirm_clear = st.sidebar.checkbox('Confirm delete all data')
     _btn_clear_all = st.sidebar.button('Clear All Data')
     if _btn_clear_all and _confirm_clear:
         try:
-            # 1) Backup current master
             backup_master()
-            # 2) Write empty master with headers only
             pd.DataFrame(columns=DISPLAY_COLS).to_csv(MASTER_CSV, index=False)
-            # 3) Run the cleaner (no-op on empty, but ensures normalization pipeline executes)
             raw = pd.read_csv(MASTER_CSV, dtype=str) if Path(MASTER_CSV).exists() else pd.DataFrame(columns=DISPLAY_COLS)
             cleaned, _drop_total, _drop_dates, _drop_origin = clean_master_df(raw)
             cleaned.to_csv(MASTER_CSV, index=False)
