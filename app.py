@@ -390,9 +390,7 @@ if st.session_state['is_admin']:
                 errors.append(f"{getattr(up,'name','file')}: {e}")
 
         if errors:
-            st.sidebar.error("Some files failed:
-" + "
-".join(errors))
+            st.sidebar.error("Some files failed:\n" + "\n".join(errors))
 
         if parts:
             incoming = pd.concat(parts, ignore_index=True)
