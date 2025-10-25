@@ -11,6 +11,7 @@ from datetime import datetime
 # Config
 # =========================
 st.set_page_config(page_title='Route Search Tool', layout='wide')
+
 MASTER_CSV = os.environ.get("MASTER_CSV", "FinalSchedule_normalized.csv")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASS", "Delta01$")
 DATA_XLSX = os.environ.get("DATA_XLSX", "map1.xlsx")  # only used if master missing
@@ -22,16 +23,24 @@ DISPLAY_COLS = ['Dest', 'Origin', 'Freq', 'A/L', 'EQPT', 'Eff Date', 'Term Date'
 FLEET_ALLOWED = ['220','320','737','757/767','764','330','350','717','RJ','Other']
 
 # =========================
-# Safe hard reset handler
+# Safe hard reset helper
 # =========================
-if st.session_state.get('_trigger_hard_reset_', False):
-    try: st.cache_data.clear()
-    except Exception: pass
-    try: st.cache_resource.clear()
-    except Exception: pass
+def hard_reset():
+    """Full nuke reset, only used by the manual Restart App button."""
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+    try:
+        st.cache_resource.clear()
+    except Exception:
+        pass
+    # wipe this user's session_state, not global process state
     for _k in list(st.session_state.keys()):
-        try: del st.session_state[_k]
-        except Exception: pass
+        try:
+            del st.session_state[_k]
+        except Exception:
+            pass
     st.rerun()
 
 st.title('Route Search Tool')
@@ -39,10 +48,6 @@ st.title('Route Search Tool')
 # =========================
 # Helpers
 # =========================
-def restart_app(full_reset: bool = True):
-    st.session_state['_trigger_hard_reset_'] = True
-    st.rerun()
-
 def _to_na(s: pd.Series) -> pd.Series:
     return (
         s.astype(str)
@@ -51,17 +56,28 @@ def _to_na(s: pd.Series) -> pd.Series:
     )
 
 def parse_any_date(series: pd.Series) -> pd.Series:
+    # Try ddMMMyy like 05Oct25, then general parse, then Excel serials
     s = _to_na(series)
     dt = pd.to_datetime(s, format='%d%b%y', errors='coerce')
     m = dt.isna()
     if m.any():
-        dt.loc[m] = pd.to_datetime(s.loc[m], errors='coerce', dayfirst=False, infer_datetime_format=True)
+        dt.loc[m] = pd.to_datetime(
+            s.loc[m],
+            errors='coerce',
+            dayfirst=False,
+            infer_datetime_format=True
+        )
     m = dt.isna()
     if m.any():
         as_num = pd.to_numeric(s.loc[m], errors='coerce')
         num_mask = as_num.notna()
         if num_mask.any():
-            dt.loc[as_num.index[num_mask]] = pd.to_datetime(as_num[num_mask], unit='d', origin='1899-12-30', errors='coerce')
+            dt.loc[as_num.index[num_mask]] = pd.to_datetime(
+                as_num[num_mask],
+                unit='d',
+                origin='1899-12-30',
+                errors='coerce'
+            )
     return dt
 
 def ensure_display_cols(df: pd.DataFrame) -> pd.DataFrame:
@@ -79,15 +95,22 @@ def clean_origin(df: pd.DataFrame) -> pd.DataFrame:
 def load_raw_excel(path: str) -> pd.DataFrame:
     xl = pd.ExcelFile(path)
     sheet = xl.sheet_names[0]
+
+    # detect header row (where STA / PREV CITY appear)
     raw = pd.read_excel(path, sheet_name=sheet, header=None)
     header_idx = None
     for i in range(min(25, len(raw))):
         row_vals = raw.iloc[i].astype(str).str.strip().str.upper().tolist()
-        if ('STA' in row_vals) and (('PREV CITY' in row_vals) or ('PREV  CITY' in row_vals) or ('PREVCITY' in row_vals)):
+        if ('STA' in row_vals) and (
+            ('PREV CITY' in row_vals) or
+            ('PREV  CITY' in row_vals) or
+            ('PREVCITY' in row_vals)
+        ):
             header_idx = i
             break
     if header_idx is None:
         header_idx = 0
+
     df = pd.read_excel(path, sheet_name=sheet, header=header_idx)
     df.columns = [str(c).strip() for c in df.columns]
     return df
@@ -109,7 +132,13 @@ def _last_updated_text(filepath: str) -> str:
     return '—'
 
 @st.cache_data(show_spinner=True)
-def get_display_df() -> pd.DataFrame:
+def _load_master_df_from_disk() -> pd.DataFrame:
+    """
+    Read master from CSV on disk (MASTER_CSV).
+    If missing, attempt fallback excel (DATA_XLSX).
+    Return cleaned DataFrame with correct cols, parsed dates, etc.
+    """
+    # Case 1: master CSV exists
     if Path(MASTER_CSV).exists():
         df = pd.read_csv(MASTER_CSV, dtype=str)
         if 'Eff Date' in df.columns:
@@ -119,39 +148,52 @@ def get_display_df() -> pd.DataFrame:
         df = ensure_display_cols(df)
         df = clean_origin(df)
         return df
-    else:
-        if Path(DATA_XLSX).exists():
-            df = load_raw_excel(DATA_XLSX)
-            rename_map = {
-                'STA': 'Dest',
-                'PREV CITY': 'Origin',
-                'PREV  CITY': 'Origin',
-                'PREVCITY': 'Origin',
-                'EFF DATE': 'Eff Date',
-                'TERM DATE': 'Term Date',
-                'FREQ': 'Freq',
-                'A/L': 'A/L',
-                'EQPT': 'EQPT',
-            }
-            df = df.rename(columns=rename_map)
-            if 'Eff Date' in df.columns:
-                df['Eff Date'] = parse_any_date(df['Eff Date'])
-            if 'Term Date' in df.columns:
-                df['Term Date'] = parse_any_date(df['Term Date'])
-            df = ensure_display_cols(df)
-            df = clean_origin(df)
-            return df
-        else:
-            base = pd.DataFrame(columns=DISPLAY_COLS)
-            base.to_csv(MASTER_CSV, index=False)
-            return base
+
+    # Case 2: seed Excel
+    if Path(DATA_XLSX).exists():
+        df = load_raw_excel(DATA_XLSX)
+        rename_map = {
+            'STA': 'Dest',
+            'PREV CITY': 'Origin',
+            'PREV  CITY': 'Origin',
+            'PREVCITY': 'Origin',
+            'EFF DATE': 'Eff Date',
+            'TERM DATE': 'Term Date',
+            'FREQ': 'Freq',
+            'A/L': 'A/L',
+            'EQPT': 'EQPT',
+        }
+        df = df.rename(columns={c: rename_map.get(c, c) for c in df.columns})
+        if 'Eff Date' in df.columns:
+            df['Eff Date'] = parse_any_date(df['Eff Date'])
+        if 'Term Date' in df.columns:
+            df['Term Date'] = parse_any_date(df['Term Date'])
+        df = ensure_display_cols(df)
+        df = clean_origin(df)
+        return df
+
+    # Case 3: nothing exists — create empty skeleton
+    base = pd.DataFrame(columns=DISPLAY_COLS)
+    base.to_csv(MASTER_CSV, index=False)
+    return base
 
 def read_map_upload(file_like) -> pd.DataFrame:
     name = getattr(file_like, 'name', '').lower()
+
+    # raw import (skip first 4 rows of junk header)
     if name.endswith('.xlsx') or name.endswith('.xls'):
         df = pd.read_excel(file_like, header=0, skiprows=4, dtype=str, engine='openpyxl')
     else:
-        df = pd.read_csv(file_like, header=0, skiprows=4, dtype=str, encoding='utf-8', on_bad_lines='skip')
+        df = pd.read_csv(
+            file_like,
+            header=0,
+            skiprows=4,
+            dtype=str,
+            encoding='utf-8',
+            on_bad_lines='skip'
+        )
+
+    # normalize column names
     mapping = {
         'STA': 'Dest',
         'Dest': 'Dest',
@@ -171,13 +213,18 @@ def read_map_upload(file_like) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     df = df.rename(columns={c: mapping.get(c, c) for c in df.columns})
     df = ensure_display_cols(df)
+
+    # strip spaces
     for c in ['Dest','Origin','Freq','A/L','EQPT']:
         df[c] = df[c].astype(str).str.strip()
+
+    # parse & validate dates / origin
     eff = parse_any_date(df['Eff Date'])
     term = parse_any_date(df['Term Date'])
     origin_ok = df['Origin'].astype(str).str.strip().ne('')
     dates_ok = eff.notna() & term.notna()
     keep_mask = dates_ok & origin_ok
+
     dropped_dates = int((~dates_ok).sum())
     dropped_origin = int((~origin_ok).sum())
     dropped_total = int((~keep_mask).sum())
@@ -186,6 +233,7 @@ def read_map_upload(file_like) -> pd.DataFrame:
             f"Dropped {dropped_total} rows from {getattr(file_like,'name','file')} "
             f"(invalid/missing dates: {dropped_dates}, blank origin: {dropped_origin})."
         )
+
     df = df.loc[keep_mask].copy()
     df['Eff Date'] = eff.loc[keep_mask].dt.strftime('%Y-%m-%d')
     df['Term Date'] = term.loc[keep_mask].dt.strftime('%Y-%m-%d')
@@ -208,13 +256,18 @@ def restore_latest_backup():
             return
         shutil.copy(ROLLING_BACKUP, MASTER_CSV)
         st.sidebar.success(f'Restored rolling backup → {MASTER_CSV}')
-        restart_app(full_reset=True)
+        # refresh the cache for everyone
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
     except Exception as e:
         st.sidebar.error('Restore failed: ' + str(e))
 
 def merge_override(master_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
     combined = pd.concat([master_df, new_df], ignore_index=True)
     combined = ensure_display_cols(combined)
+    # drop full-row dupes based on all DISPLAY_COLS
     combined = combined.drop_duplicates(subset=DISPLAY_COLS, keep='last')
     combined = combined.sort_values(by=DISPLAY_COLS, kind='mergesort', ignore_index=True)
     return combined
@@ -246,25 +299,31 @@ def map_to_fleet(eqpt: str) -> str:
 
 def clean_master_df(df: pd.DataFrame):
     df = ensure_display_cols(df)
+
+    # basic trim
     for c in ['Dest','Origin','Freq','A/L','EQPT']:
         df[c] = df[c].astype(str).str.strip()
+
     eff = parse_any_date(df['Eff Date'])
     term = parse_any_date(df['Term Date'])
     origin_ok = df['Origin'].astype(str).str.strip().ne('')
     dates_ok = eff.notna() & term.notna()
     keep = dates_ok & origin_ok
+
     cleaned = df.loc[keep].copy()
     cleaned['Eff Date'] = eff.loc[keep].dt.strftime('%Y-%m-%d')
     cleaned['Term Date'] = term.loc[keep].dt.strftime('%Y-%m-%d')
+
     cleaned = cleaned.drop_duplicates(subset=DISPLAY_COLS, keep='last')
     cleaned = cleaned.sort_values(by=DISPLAY_COLS, kind='mergesort', ignore_index=True)
+
     dropped_dates = int((~dates_ok).sum())
     dropped_origin = int((~origin_ok).sum())
     dropped_total = int((~keep).sum())
     return cleaned, dropped_total, dropped_dates, dropped_origin
 
 # =========================
-# Auth
+# Auth gate
 # =========================
 login_placeholder = st.empty()
 if 'authenticated' not in st.session_state:
@@ -283,28 +342,35 @@ if not st.session_state['authenticated']:
                 st.rerun()
             else:
                 st.error('❌ Incorrect password.')
+
+# If still not authenticated, stop here (important: no data access yet)
 if not st.session_state['authenticated']:
     st.stop()
 
+# Logout button (per-session)
 if st.sidebar.button('🚪 Logout'):
     st.session_state['authenticated'] = False
     st.rerun()
 
 # =========================
-# Sidebar status (rows + last updated + backup presence)
+# Sidebar status box (safe)
 # =========================
 def show_status_box():
     try:
         if Path(MASTER_CSV).exists():
             raw = pd.read_csv(MASTER_CSV, dtype=str)
             rows = len(raw)
+
             e = _to_na(raw['Eff Date']) if 'Eff Date' in raw.columns else pd.Series([], dtype=str)
             t = _to_na(raw['Term Date']) if 'Term Date' in raw.columns else pd.Series([], dtype=str)
+
             eff_bad = e.notna().sum() - parse_any_date(e).notna().sum() if len(e) else 0
             term_bad = t.notna().sum() - parse_any_date(t).notna().sum() if len(t) else 0
+
             last = _last_updated_text(MASTER_CSV)
             backup_state = "✅ Backup available" if ROLLING_BACKUP.exists() else "⚠️ No backup yet"
             msg = f'📊 {rows:,} rows • Last updated: {last} • {backup_state}'
+
             if eff_bad > 0 or term_bad > 0:
                 msg += f' | ⚠️ Unparsed dates → Eff: {eff_bad}, Term: {term_bad}'
                 st.sidebar.warning(msg)
@@ -313,31 +379,68 @@ def show_status_box():
         else:
             st.sidebar.warning('⚠️ Master CSV not found')
     except Exception as e:
-        st.sidebar.error(f'Failed to read master CSV: {e}')
+        st.sidebar.error(f'Data temporarily unavailable: {e}')
 
 show_status_box()
-data = get_display_df()
+
+# =========================
+# Load data safely
+# =========================
+try:
+    data = _load_master_df_from_disk()
+except Exception as e:
+    st.error("Data failed to load. Try again shortly.")
+    st.caption(str(e))
+    st.stop()
 
 # =========================
 # Filters
 # =========================
 st.sidebar.header('Filters')
+
 for key in ['sel_origs','sel_dests','sel_eqpts','sel_fleets']:
-    if key not in st.session_state: st.session_state[key] = []
+    if key not in st.session_state:
+        st.session_state[key] = []
 
 sel_date = st.sidebar.date_input('Select Date', value=pd.Timestamp.today().date())
-orig_options = sorted([x for x in data['Origin'].dropna().astype(str).unique().tolist() if len(x) > 0])
-dest_options = sorted([x for x in data['Dest'].dropna().astype(str).unique().tolist() if len(x) > 0])
-eqpt_options = sorted([x for x in data['EQPT'].dropna().astype(str).unique().tolist() if len(x) > 0])
+
+# build dropdown options
+orig_options = sorted([
+    x for x in data['Origin'].dropna().astype(str).unique().tolist() if len(x) > 0
+])
+dest_options = sorted([
+    x for x in data['Dest'].dropna().astype(str).unique().tolist() if len(x) > 0
+])
+eqpt_options = sorted([
+    x for x in data['EQPT'].dropna().astype(str).unique().tolist() if len(x) > 0
+])
 
 data['Fleet'] = data['EQPT'].apply(map_to_fleet)
-present_fleets = sorted([f for f in data['Fleet'].dropna().unique().tolist() if f in FLEET_ALLOWED])
+present_fleets = sorted([
+    f for f in data['Fleet'].dropna().unique().tolist() if f in FLEET_ALLOWED
+])
 fleet_options = present_fleets
 
-sel_origs = st.sidebar.multiselect('Filter Origin (optional)', orig_options, default=st.session_state['sel_origs'])
-sel_dests = st.sidebar.multiselect('Filter Dest (optional)', dest_options, default=st.session_state['sel_dests'])
-sel_fleets = st.sidebar.multiselect('Filter Fleet (optional)', fleet_options, default=st.session_state['sel_fleets'])
-sel_eqpts = st.sidebar.multiselect('Filter EQPT (optional)', eqpt_options, default=st.session_state['sel_eqpts'])
+sel_origs = st.sidebar.multiselect(
+    'Filter Origin (optional)',
+    orig_options,
+    default=st.session_state['sel_origs']
+)
+sel_dests = st.sidebar.multiselect(
+    'Filter Dest (optional)',
+    dest_options,
+    default=st.session_state['sel_dests']
+)
+sel_fleets = st.sidebar.multiselect(
+    'Filter Fleet (optional)',
+    fleet_options,
+    default=st.session_state['sel_fleets']
+)
+sel_eqpts = st.sidebar.multiselect(
+    'Filter EQPT (optional)',
+    eqpt_options,
+    default=st.session_state['sel_eqpts']
+)
 
 st.session_state['sel_origs'] = sel_origs
 st.session_state['sel_dests'] = sel_dests
@@ -350,7 +453,7 @@ if st.sidebar.button('Reset Filters'):
     st.rerun()
 
 if st.sidebar.button('🔄 Restart App', use_container_width=True):
-    restart_app(full_reset=True)
+    hard_reset()
 
 # =========================
 # Admin
@@ -377,9 +480,18 @@ if st.session_state['is_admin']:
             st.sidebar.write('•', u.name)
 
     if st.sidebar.button('Process & Merge', type='primary', disabled=not uploads):
+        # backup first
         backup_master()
-        master = pd.read_csv(MASTER_CSV, dtype=str) if Path(MASTER_CSV).exists() else pd.DataFrame(columns=DISPLAY_COLS)
-        master = ensure_display_cols(master)
+
+        # load current master from disk (not cached, fresh read)
+        try:
+            master_now = pd.read_csv(MASTER_CSV, dtype=str) if Path(MASTER_CSV).exists() \
+                         else pd.DataFrame(columns=DISPLAY_COLS)
+        except Exception as e:
+            master_now = pd.DataFrame(columns=DISPLAY_COLS)
+            st.sidebar.warning(f"Master read failed, starting blank: {e}")
+
+        master_now = ensure_display_cols(master_now)
 
         parts, errors = [], []
         for up in uploads or []:
@@ -394,29 +506,60 @@ if st.session_state['is_admin']:
 
         if parts:
             incoming = pd.concat(parts, ignore_index=True)
-            merged = merge_override(master, incoming)
+            merged = merge_override(master_now, incoming)
+
             cleaned, dropped_total, dropped_dates, dropped_origin = clean_master_df(merged)
             if dropped_total > 0:
-                st.sidebar.warning(f'Post-merge cleanup dropped {dropped_total} rows (invalid/missing dates: {dropped_dates}, blank origin: {dropped_origin}).')
-            cleaned.to_csv(MASTER_CSV, index=False)
-            st.sidebar.success(f'Merge complete. Rows now: {len(cleaned):,}')
-            restart_app(full_reset=True)
+                st.sidebar.warning(
+                    f'Post-merge cleanup dropped {dropped_total} rows '
+                    f'(invalid/missing dates: {dropped_dates}, blank origin: {dropped_origin}).'
+                )
+
+            try:
+                cleaned.to_csv(MASTER_CSV, index=False)
+                st.sidebar.success(f'Merge complete. Rows now: {len(cleaned):,}')
+                # clear cache so next read sees the new file
+                try:
+                    st.cache_data.clear()
+                except Exception:
+                    pass
+            except Exception as e:
+                st.sidebar.error(f'Failed to write master: {e}')
         else:
             st.sidebar.warning('No valid rows found to merge.')
 
     st.sidebar.markdown('---')
     st.sidebar.subheader('Maintenance')
+
     if st.sidebar.button('⏪ Restore latest backup', use_container_width=True):
         restore_latest_backup()
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        st.experimental_rerun() if hasattr(st, "experimental_rerun") else st.rerun()
 
     if st.sidebar.button('🧹 Clean & normalize master (drop invalid dates/origin)', use_container_width=True):
         try:
             backup_master()
-            raw = pd.read_csv(MASTER_CSV, dtype=str) if Path(MASTER_CSV).exists() else pd.DataFrame(columns=DISPLAY_COLS)
+            # fresh read
+            raw = pd.read_csv(MASTER_CSV, dtype=str) if Path(MASTER_CSV).exists() \
+                  else pd.DataFrame(columns=DISPLAY_COLS)
+
             cleaned, dropped_total, dropped_dates, dropped_origin = clean_master_df(raw)
             cleaned.to_csv(MASTER_CSV, index=False)
-            st.sidebar.success(f'Cleaned master. Dropped {dropped_total} rows (invalid/missing dates: {dropped_dates}, blank origin: {dropped_origin}). Now {len(cleaned):,} rows.')
-            restart_app(full_reset=True)
+
+            st.sidebar.success(
+                f'Cleaned master. Dropped {dropped_total} rows '
+                f'(invalid/missing dates: {dropped_dates}, blank origin: {dropped_origin}). '
+                f'Now {len(cleaned):,} rows.'
+            )
+
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
+
         except Exception as e:
             st.sidebar.error(f'Clean failed: {e}')
 
@@ -425,12 +568,22 @@ if st.session_state['is_admin']:
     if _btn_clear_all and _confirm_clear:
         try:
             backup_master()
+            # wipe
             pd.DataFrame(columns=DISPLAY_COLS).to_csv(MASTER_CSV, index=False)
-            raw = pd.read_csv(MASTER_CSV, dtype=str) if Path(MASTER_CSV).exists() else pd.DataFrame(columns=DISPLAY_COLS)
-            cleaned, _drop_total, _drop_dates, _drop_origin = clean_master_df(raw)
-            cleaned.to_csv(MASTER_CSV, index=False)
+
+            # normalize empty
+            raw2 = pd.read_csv(MASTER_CSV, dtype=str) if Path(MASTER_CSV).exists() \
+                   else pd.DataFrame(columns=DISPLAY_COLS)
+            cleaned2, _drop_total, _drop_dates, _drop_origin = clean_master_df(raw2)
+            cleaned2.to_csv(MASTER_CSV, index=False)
+
             st.sidebar.success('All data cleared and master normalized.')
-            restart_app(full_reset=True)
+
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
+
         except Exception as e:
             st.sidebar.error('Failed to clear & normalize: ' + str(e))
 
@@ -443,10 +596,11 @@ else:
         st.sidebar.info('🔒 Admin mode locked — enter password to access upload & maintenance')
 
 # =========================
-# Filtering
+# Filtering logic
 # =========================
 df = data.copy()
 sel_ts = pd.Timestamp(sel_date)
+
 df['Fleet'] = df['EQPT'].apply(map_to_fleet)
 
 if 'Eff Date' in df.columns and 'Term Date' in df.columns:
@@ -470,15 +624,20 @@ if len(sel_eqpts) > 0:
     df = df[df['EQPT'].astype(str).isin(sel_eqpts)]
 
 # =========================
-# Unique Destinations (wide table)
+# Unique Destinations grid
 # =========================
 def render_unique_dest_table(filtered_df: pd.DataFrame, n_cols: int = 7, height: int = 220):
     st.subheader('Unique Destinations')
     if filtered_df.empty:
         st.info('No data for current filters.')
         return []
-    dest_col_candidates = [c for c in filtered_df.columns if c.strip().lower() in ('dest','dest (sta)','sta','destination')]
+
+    dest_col_candidates = [
+        c for c in filtered_df.columns
+        if c.strip().lower() in ('dest','dest (sta)','sta','destination')
+    ]
     dest_col = dest_col_candidates[0] if dest_col_candidates else 'Dest'
+
     uniq = (
         filtered_df[dest_col]
         .astype(str)
@@ -492,6 +651,7 @@ def render_unique_dest_table(filtered_df: pd.DataFrame, n_cols: int = 7, height:
     if n == 0:
         st.info('No unique destinations found.')
         return []
+
     rows = int(np.ceil(n / n_cols))
     table = np.empty((rows, n_cols), dtype=object)
     table[:] = ''
@@ -499,8 +659,10 @@ def render_unique_dest_table(filtered_df: pd.DataFrame, n_cols: int = 7, height:
         r = i // n_cols
         c = i % n_cols
         table[r, c] = val
+
     wide_df = pd.DataFrame(table, columns=[f'Dest {i+1}' for i in range(n_cols)])
     st.dataframe(wide_df, use_container_width=True, height=height)
+
     return list(uniq)
 
 unique_list = render_unique_dest_table(df, n_cols=7, height=220)
@@ -510,10 +672,12 @@ unique_list = render_unique_dest_table(df, n_cols=7, height=220)
 # =========================
 st.subheader('Filtered Results')
 st.write(f'Date: {sel_date} | Rows: {len(df)}')
+
 show_cols = ['Dest', 'Origin', 'Freq', 'A/L', 'EQPT', 'Fleet', 'Eff Date', 'Term Date']
 for c in show_cols:
     if c not in df.columns:
         df[c] = pd.NA
+
 st.dataframe(df[show_cols], use_container_width=True, height=420)
 st.caption('Showing: Dest, Origin, Freq, A/L, EQPT, Fleet, Eff Date, Term Date')
 
@@ -529,17 +693,24 @@ def load_airports(path: str):
     return a
 
 st.subheader('Map of Unique Destinations')
+
 def render_map(unique_dests: list):
     if not unique_dests:
         st.info('No destinations to plot.')
         return
+
     airports_df = load_airports(IATA_LATLONG_CSV)
-    points = pd.DataFrame({'Dest': unique_dests}).merge(
-        airports_df, on='Dest', how='left'
-    ).dropna(subset=['Lat','Long'])
+
+    points = (
+        pd.DataFrame({'Dest': unique_dests})
+        .merge(airports_df, on='Dest', how='left')
+        .dropna(subset=['Lat','Long'])
+    )
+
     if points.empty:
         st.info('No coordinates available for current selection.')
         return
+
     deck = pdk.Deck(
         layers=[
             pdk.Layer(
