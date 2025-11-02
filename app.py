@@ -531,6 +531,14 @@ if st.session_state['is_admin']:
     st.sidebar.markdown('---')
     st.sidebar.subheader('Maintenance')
 
+    # NEW: Generate backup button
+    if st.sidebar.button('💾 Generate backup', use_container_width=True):
+        p = backup_master()
+        if p:
+            st.sidebar.success(f'Backup saved → {p}')
+        else:
+            st.sidebar.error('Backup failed.')
+
     if st.sidebar.button('⏪ Restore latest backup', use_container_width=True):
         restore_latest_backup()
         try:
@@ -668,18 +676,33 @@ def render_unique_dest_table(filtered_df: pd.DataFrame, n_cols: int = 7, height:
 unique_list = render_unique_dest_table(df, n_cols=7, height=220)
 
 # =========================
-# Results Table
+# Results Table (expanded with Flight number & Departure Time)
 # =========================
 st.subheader('Filtered Results')
 st.write(f'Date: {sel_date} | Rows: {len(df)}')
 
-show_cols = ['Dest', 'Origin', 'Freq', 'A/L', 'EQPT', 'Fleet', 'Eff Date', 'Term Date']
+def _pick_col(cols, candidates):
+    for c in candidates:
+        if c in cols:
+            return c
+    return None
+
+flight_src = _pick_col(df.columns, ['Flight','Flight #','Flt#','Flt','FLT','FLIGHT'])
+dept_src   = _pick_col(df.columns, ['Dep Time','Departure Time','STD','ETD','Dept Time','DEP TIME'])
+
+df['Flight number']  = df[flight_src] if flight_src else pd.NA
+df['Departure Time'] = df[dept_src]   if dept_src   else pd.NA
+
+show_cols = [
+    'Dest', 'Origin', 'Flight number', 'Departure Time',
+    'Freq', 'A/L', 'EQPT', 'Fleet', 'Eff Date', 'Term Date'
+]
 for c in show_cols:
     if c not in df.columns:
         df[c] = pd.NA
 
 st.dataframe(df[show_cols], use_container_width=True, height=420)
-st.caption('Showing: Dest, Origin, Freq, A/L, EQPT, Fleet, Eff Date, Term Date')
+st.caption('Showing: Dest, Origin, Flight number, Departure Time, Freq, A/L, EQPT, Fleet, Eff Date, Term Date')
 
 # =========================
 # Map of Unique Destinations
