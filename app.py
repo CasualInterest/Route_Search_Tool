@@ -13,7 +13,13 @@ from datetime import datetime
 st.set_page_config(page_title='Route Search Tool', layout='wide')
 
 MASTER_CSV = os.environ.get("MASTER_CSV", "FinalSchedule_normalized.csv")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASS", "Delta01$")
+
+# Admin password: from Streamlit secrets or environment variable ONLY (no hard-coded fallback)
+try:
+    ADMIN_PASSWORD = st.secrets["ADMIN_PASSWORD"]
+except Exception:
+    ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")  # can be set in deployment env
+
 DATA_XLSX = os.environ.get("DATA_XLSX", "map1.xlsx")  # only used if master missing
 IATA_LATLONG_CSV = os.environ.get("IATA_LATLONG_CSV", "iata_latlong.csv")
 BACKUP_DIR = Path("backups")
@@ -343,36 +349,6 @@ def clean_master_df(df: pd.DataFrame):
     return cleaned, dropped_total, dropped_dates, dropped_origin
 
 # =========================
-# Auth gate
-# =========================
-login_placeholder = st.empty()
-if 'authenticated' not in st.session_state:
-    st.session_state['authenticated'] = False
-
-if not st.session_state['authenticated']:
-    with login_placeholder.container():
-        st.subheader('🔑 Enter Password to Continue')
-        password = st.text_input('Password', type='password')
-        login_btn = st.button('Login')
-        if login_btn:
-            if password == 'FLYDELTA':
-                st.session_state['authenticated'] = True
-                st.success('✅ Login successful!')
-                login_placeholder.empty()
-                st.rerun()
-            else:
-                st.error('❌ Incorrect password.')
-
-# If still not authenticated, stop here (important: no data access yet)
-if not st.session_state['authenticated']:
-    st.stop()
-
-# Logout button (per-session)
-if st.sidebar.button('🚪 Logout'):
-    st.session_state['authenticated'] = False
-    st.rerun()
-
-# =========================
 # Sidebar status box (safe)
 # =========================
 def show_status_box():
@@ -479,6 +455,7 @@ if st.sidebar.button('🔄 Restart App', use_container_width=True):
 # Admin
 # =========================
 st.sidebar.markdown('---')
+
 if 'is_admin' not in st.session_state:
     st.session_state['is_admin'] = False
 
@@ -556,7 +533,7 @@ if st.session_state['is_admin']:
     st.sidebar.markdown('---')
     st.sidebar.subheader('Maintenance')
 
-    # NEW: Generate backup button
+    # Generate backup button
     if st.sidebar.button('💾 Generate backup', use_container_width=True):
         p = backup_master()
         if p:
@@ -621,12 +598,18 @@ if st.session_state['is_admin']:
             st.sidebar.error('Failed to clear & normalize: ' + str(e))
 
 else:
+    # Admin login prompt (no password ever stored in code)
     admin_pass = st.sidebar.text_input('Admin Password', type='password')
-    if admin_pass == ADMIN_PASSWORD:
-        st.session_state['is_admin'] = True
-        st.rerun()
+    if not ADMIN_PASSWORD:
+        st.sidebar.info('🔒 Admin password not configured in secrets/env.')
+    elif admin_pass:
+        if admin_pass == ADMIN_PASSWORD:
+            st.session_state['is_admin'] = True
+            st.experimental_rerun() if hasattr(st, "experimental_rerun") else st.rerun()
+        else:
+            st.sidebar.error('❌ Incorrect admin password.')
     else:
-        st.sidebar.info('🔒 Admin mode locked — enter password to access upload & maintenance')
+        st.sidebar.info('🔒 Enter admin password to access upload & maintenance')
 
 # =========================
 # Filtering logic
