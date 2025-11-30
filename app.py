@@ -497,3 +497,283 @@ if st.session_state['is_admin']:
     if uploads:
         st.sidebar.caption('Files queued:')
         for u in uploads:
+            st.sidebar.write('•', u.name)
+
+    if st.sidebar.button('Process & Merge', type='primary', disabled=not uploads):
+        # backup first
+        backup_master()
+
+        # load current master from disk (not cached, fresh read)
+        try:
+            master_now = pd.read_csv(MASTER_CSV, dtype=str) if Path(MASTER_CSV).exists() \
+                         else pd.DataFrame(columns=DISPLAY_COLS)
+        except Exception as e:
+            master_now = pd.DataFrame(columns=DISPLAY_COLS)
+            st.sidebar.warning(f"Master read failed, starting blank: {e}")
+
+        # Strip any legacy sensitive cols from master before merge
+        master_now = master_now.drop(
+            columns=[c for c in master_now.columns if c in SENSITIVE_COLS],
+            errors='ignore'
+        )
+        master_now = ensure_display_cols(master_now)
+
+        parts, errors = [], []
+        for up in uploads or []:
+            try:
+                dfp = read_map_upload(up)
+                parts.append(dfp)
+            except Exception as e:
+                errors.append(f"{getattr(up,'name','file')}: {e}")
+
+        if errors:
+            st.sidebar.error("Some files failed:\n" + "\n".join(errors))
+
+        if parts:
+            incoming = pd.concat(parts, ignore_index=True)
+            merged = merge_override(master_now, incoming)
+
+            cleaned, dropped_total, dropped_dates, dropped_origin = clean_master_df(merged)
+            if dropped_total > 0:
+                st.sidebar.warning(
+                    f'Post-merge cleanup dropped {dropped_total} rows '
+                    f'(invalid/missing dates: {dropped_dates}, blank origin: {dropped_origin}).'
+                )
+
+            try:
+                cleaned.to_csv(MASTER_CSV, index=False)
+                st.sidebar.success(f'Merge complete. Rows now: {len(cleaned):,}')
+                # clear cache so next read sees the new file
+                try:
+                    st.cache_data.clear()
+                except Exception:
+                    pass
+            except Exception as e:
+                st.sidebar.error(f'Failed to write master: {e}')
+        else:
+            st.sidebar.warning('No valid rows found to merge.')
+
+    st.sidebar.markdown('---')
+    st.sidebar.subheader('Maintenance')
+
+    # NEW: Generate backup button
+    if st.sidebar.button('💾 Generate backup', use_container_width=True):
+        p = backup_master()
+        if p:
+            st.sidebar.success(f'Backup saved → {p}')
+        else:
+            st.sidebar.error('Backup failed.')
+
+    if st.sidebar.button('⏪ Restore latest backup', use_container_width=True):
+        restore_latest_backup()
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        st.experimental_rerun() if hasattr(st, "experimental_rerun") else st.rerun()
+
+    if st.sidebar.button('🧹 Clean & normalize master (drop invalid dates/origin)', use_container_width=True):
+        try:
+            backup_master()
+            # fresh read
+            raw = pd.read_csv(MASTER_CSV, dtype=str) if Path(MASTER_CSV).exists() \
+                  else pd.DataFrame(columns=DISPLAY_COLS)
+
+            cleaned, dropped_total, dropped_dates, dropped_origin = clean_master_df(raw)
+            cleaned.to_csv(MASTER_CSV, index=False)
+
+            st.sidebar.success(
+                f'Cleaned master. Dropped {dropped_total} rows '
+                f'(invalid/missing dates: {dropped_dates}, blank origin: {dropped_origin}). '
+                f'Now {len(cleaned):,} rows.'
+            )
+
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
+
+        except Exception as e:
+            st.sidebar.error(f'Clean failed: {e}')
+
+    _confirm_clear = st.sidebar.checkbox('Confirm delete all data')
+    _btn_clear_all = st.sidebar.button('Clear All Data')
+    if _btn_clear_all and _confirm_clear:
+        try:
+            backup_master()
+            # wipe
+            pd.DataFrame(columns=DISPLAY_COLS).to_csv(MASTER_CSV, index=False)
+
+            # normalize empty
+            raw2 = pd.read_csv(MASTER_CSV, dtype=str) if Path(MASTER_CSV).exists() \
+                   else pd.DataFrame(columns=DISPLAY_COLS)
+            cleaned2, _drop_total, _drop_dates, _drop_origin = clean_master_df(raw2)
+            cleaned2.to_csv(MASTER_CSV, index=False)
+
+            st.sidebar.success('All data cleared and master normalized.')
+
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
+
+        except Exception as e:
+            st.sidebar.error('Failed to clear & normalize: ' + str(e))
+
+else:
+    admin_pass = st.sidebar.text_input('Admin Password', type='password')
+    if admin_pass == ADMIN_PASSWORD:
+        st.session_state['is_admin'] = True
+        st.rerun()
+    else:
+        st.sidebar.info('🔒 Admin mode locked — enter password to access upload & maintenance')
+
+# =========================
+# Filtering logic
+# =========================
+df = data.copy()
+sel_ts = pd.Timestamp(sel_date)
+
+df['Fleet'] = df['EQPT'].apply(map_to_fleet)
+
+if 'Eff Date' in df.columns and 'Term Date' in df.columns:
+    df['Eff Date'] = parse_any_date(df['Eff Date'])
+    df['Term Date'] = parse_any_date(df['Term Date'])
+    mask_date = (
+        (df['Eff Date'].notna()) &
+        (df['Term Date'].notna()) &
+        (df['Eff Date'] <= sel_ts) &
+        (df['Term Date'] >= sel_ts)
+    )
+    df = df[mask_date]
+
+    # Re-format after filtering (remove time from display)
+    df['Eff Date'] = df['Eff Date'].dt.strftime('%Y-%m-%d')
+    df['Term Date'] = df['Term Date'].dt.strftime('%Y-%m-%d')
+
+if len(sel_dests) > 0:
+    df = df[df['Dest'].astype(str).isin(sel_dests)]
+if len(sel_origs) > 0:
+    df = df[df['Origin'].astype(str).isin(sel_origs)]
+if len(sel_fleets) > 0:
+    df = df[df['Fleet'].isin(sel_fleets)]
+if len(sel_eqpts) > 0:
+    df = df[df['EQPT'].astype(str).isin(sel_eqpts)]
+
+# =========================
+# Unique Destinations grid
+# =========================
+def render_unique_dest_table(filtered_df: pd.DataFrame, n_cols: int = 7, height: int = 220):
+    st.subheader('Unique Destinations')
+    if filtered_df.empty:
+        st.info('No data for current filters.')
+        return []
+
+    dest_col_candidates = [
+        c for c in filtered_df.columns
+        if c.strip().lower() in ('dest','dest (sta)','sta','destination')
+    ]
+    dest_col = dest_col_candidates[0] if dest_col_candidates else 'Dest'
+
+    uniq = (
+        filtered_df[dest_col]
+        .astype(str)
+        .str.strip()
+        .replace({'nan': np.nan, 'None': np.nan, '': np.nan})
+        .dropna()
+        .unique()
+    )
+    uniq = np.sort(uniq)
+    n = len(uniq)
+    if n == 0:
+        st.info('No unique destinations found.')
+        return []
+
+    rows = int(np.ceil(n / n_cols))
+    table = np.empty((rows, n_cols), dtype=object)
+    table[:] = ''
+    for i, val in enumerate(uniq):
+        r = i // n_cols
+        c = i % n_cols
+        table[r, c] = val
+
+    wide_df = pd.DataFrame(table, columns=[f'Dest {i+1}' for i in range(n_cols)])
+    st.dataframe(wide_df, use_container_width=True, height=height)
+
+    return list(uniq)
+
+unique_list = render_unique_dest_table(df, n_cols=7, height=220)
+
+# =========================
+# Results Table (Freq hidden, no flight/dep info)
+# =========================
+st.subheader('Filtered Results')
+st.write(f'Date: {sel_date} | Rows: {len(df)}')
+
+show_cols = [
+    'Dest', 'Origin',      # no Flight / Dep, Freq hidden
+    'A/L', 'EQPT', 'Fleet', 'Eff Date', 'Term Date'
+]
+
+for c in show_cols:
+    if c not in df.columns:
+        df[c] = pd.NA
+
+st.dataframe(df[show_cols], use_container_width=True, height=420)
+st.caption('Showing: Dest, Origin, A/L, EQPT, Fleet, Eff Date, Term Date')
+
+# =========================
+# Map of Unique Destinations
+# =========================
+@st.cache_data
+def load_airports(path: str):
+    if not Path(path).exists():
+        return pd.DataFrame(columns=['Dest','Lat','Long'])
+    a = pd.read_csv(path, dtype={'Dest': str, 'Lat': float, 'Long': float})
+    a['Dest'] = a['Dest'].str.strip()
+    return a
+
+st.subheader('Map of Unique Destinations')
+
+def render_map(unique_dests: list):
+    if not unique_dests:
+        st.info('No destinations to plot.')
+        return
+
+    airports_df = load_airports(IATA_LATLONG_CSV)
+
+    points = (
+        pd.DataFrame({'Dest': unique_dests})
+        .merge(airports_df, on='Dest', how='left')
+        .dropna(subset=['Lat','Long'])
+    )
+
+    if points.empty:
+        st.info('No coordinates available for current selection.')
+        return
+
+    deck = pdk.Deck(
+        layers=[
+            pdk.Layer(
+                'ScatterplotLayer',
+                data=points,
+                get_position='[Long, Lat]',
+                get_radius=80000,
+                get_fill_color=[0, 120, 220, 160],
+                pickable=True,
+            )
+        ],
+        initial_view_state=pdk.ViewState(
+            latitude=float(points['Lat'].mean()) if not points['Lat'].isna().all() else 39.0,
+            longitude=float(points['Long'].mean()) if not points['Long'].isna().all() else -98.0,
+            zoom=3,
+            pitch=0,
+            bearing=0,
+        ),
+        tooltip={'text': 'Destination: {Dest}'},
+        map_provider='mapbox',
+        map_style=None,
+    )
+    st.pydeck_chart(deck)
+
+render_map(unique_list)
