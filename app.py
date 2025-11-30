@@ -22,6 +22,12 @@ ROLLING_BACKUP = BACKUP_DIR / "FinalSchedule_backup.csv"
 DISPLAY_COLS = ['Dest', 'Origin', 'Freq', 'A/L', 'EQPT', 'Eff Date', 'Term Date']
 FLEET_ALLOWED = ['220','320','737','757/767','764','330','350','717','RJ','Other']
 
+# Columns we never want to keep in master (flight/dep details)
+SENSITIVE_COLS = [  # <<< CHANGED
+    'Flight','Flight #','Flt#','Flt','FLT','FLIGHT',
+    'Dep Time','Departure Time','STD','ETD','Dept Time','DEP TIME'
+]
+
 # =========================
 # Safe hard reset helper
 # =========================
@@ -81,6 +87,8 @@ def parse_any_date(series: pd.Series) -> pd.Series:
     return dt
 
 def ensure_display_cols(df: pd.DataFrame) -> pd.DataFrame:
+    # Always drop sensitive columns before trimming to DISPLAY_COLS   # <<< CHANGED
+    df = df.drop(columns=[c for c in df.columns if c in SENSITIVE_COLS], errors='ignore')
     for c in DISPLAY_COLS:
         if c not in df.columns:
             df[c] = pd.NA
@@ -113,6 +121,9 @@ def load_raw_excel(path: str) -> pd.DataFrame:
 
     df = pd.read_excel(path, sheet_name=sheet, header=header_idx)
     df.columns = [str(c).strip() for c in df.columns]
+
+    # Drop any flight/dep columns from the seed excel as well        # <<< CHANGED
+    df = df.drop(columns=[c for c in df.columns if c in SENSITIVE_COLS], errors='ignore')
     return df
 
 def _fmt_ts(ts: float) -> str:
@@ -141,6 +152,9 @@ def _load_master_df_from_disk() -> pd.DataFrame:
     # Case 1: master CSV exists
     if Path(MASTER_CSV).exists():
         df = pd.read_csv(MASTER_CSV, dtype=str)
+        # Ensure any legacy flight/dep columns are purged             # <<< CHANGED
+        df = df.drop(columns=[c for c in df.columns if c in SENSITIVE_COLS], errors='ignore')
+
         if 'Eff Date' in df.columns:
             df['Eff Date'] = parse_any_date(df['Eff Date'])
         if 'Term Date' in df.columns:
@@ -212,6 +226,10 @@ def read_map_upload(file_like) -> pd.DataFrame:
     }
     df.columns = [str(c).strip() for c in df.columns]
     df = df.rename(columns={c: mapping.get(c, c) for c in df.columns})
+
+    # Drop any flight / dep columns from uploaded MAPs                  # <<< CHANGED
+    df = df.drop(columns=[c for c in df.columns if c in SENSITIVE_COLS], errors='ignore')
+
     df = ensure_display_cols(df)
 
     # strip spaces
@@ -298,6 +316,8 @@ def map_to_fleet(eqpt: str) -> str:
         return 'Other'
 
 def clean_master_df(df: pd.DataFrame):
+    # Ensure no sensitive columns remain in master                        # <<< CHANGED
+    df = df.drop(columns=[c for c in df.columns if c in SENSITIVE_COLS], errors='ignore')
     df = ensure_display_cols(df)
 
     # basic trim
@@ -491,6 +511,11 @@ if st.session_state['is_admin']:
             master_now = pd.DataFrame(columns=DISPLAY_COLS)
             st.sidebar.warning(f"Master read failed, starting blank: {e}")
 
+        # Strip any legacy sensitive cols from master before merge    # <<< CHANGED
+        master_now = master_now.drop(
+            columns=[c for c in master_now.columns if c in SENSITIVE_COLS],
+            errors='ignore'
+        )
         master_now = ensure_display_cols(master_now)
 
         parts, errors = [], []
@@ -676,33 +701,24 @@ def render_unique_dest_table(filtered_df: pd.DataFrame, n_cols: int = 7, height:
 unique_list = render_unique_dest_table(df, n_cols=7, height=220)
 
 # =========================
-# Results Table (expanded with Flight number & Departure Time)
+# Results Table (Freq hidden, no flight/dep info)
 # =========================
 st.subheader('Filtered Results')
 st.write(f'Date: {sel_date} | Rows: {len(df)}')
 
-def _pick_col(cols, candidates):
-    for c in candidates:
-        if c in cols:
-            return c
-    return None
-
-flight_src = _pick_col(df.columns, ['Flight','Flight #','Flt#','Flt','FLT','FLIGHT'])
-dept_src   = _pick_col(df.columns, ['Dep Time','Departure Time','STD','ETD','Dept Time','DEP TIME'])
-
-df['Flight number']  = df[flight_src] if flight_src else pd.NA
-df['Departure Time'] = df[dept_src]   if dept_src   else pd.NA
-
+# We no longer attempt to display any flight number or departure time   # <<< CHANGED
 show_cols = [
-    'Dest', 'Origin', 'Flight number', 'Departure Time',
-    'Freq', 'A/L', 'EQPT', 'Fleet', 'Eff Date', 'Term Date'
+    'Dest', 'Origin',  # no Flight / Dep
+    # 'Freq',            # Freq is intentionally hidden on the dashboard  # <<< CHANGED
+    'A/L', 'EQPT', 'Fleet', 'Eff Date', 'Term Date'
 ]
+
 for c in show_cols:
     if c not in df.columns:
         df[c] = pd.NA
 
 st.dataframe(df[show_cols], use_container_width=True, height=420)
-st.caption('Showing: Dest, Origin, Flight number, Departure Time, Freq, A/L, EQPT, Fleet, Eff Date, Term Date')
+st.caption('Showing: Dest, Origin, A/L, EQPT, Fleet, Eff Date, Term Date')  # <<< CHANGED
 
 # =========================
 # Map of Unique Destinations
