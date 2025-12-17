@@ -617,7 +617,7 @@ st.dataframe(df[show_cols], use_container_width=True, height=420)
 st.caption("Showing: Dest, Origin, A/L, EQPT, Fleet, Eff Date, Term Date")
 
 # =========================
-# Map of Unique Destinations
+# Fleet Destination Map (TABBED)
 # =========================
 @st.cache_data
 def load_airports(path: str):
@@ -627,47 +627,139 @@ def load_airports(path: str):
     a["Dest"] = a["Dest"].str.strip()
     return a
 
-st.subheader("Map of Unique Destinations")
+st.markdown("---")
+st.header("Fleet Destination Map")
 
-def render_map(unique_dests: list):
-    if not unique_dests:
-        st.info("No destinations to plot.")
-        return
+# Create tabs
+tab1, tab2 = st.tabs(["📅 By Date", "📊 By Fleet & Month"])
 
-    airports_df = load_airports(IATA_LATLONG_CSV)
+# TAB 1: Current date-based view
+with tab1:
+    st.subheader("Map of Unique Destinations (Current Filters)")
+    
+    def render_map(unique_dests: list, map_title: str = ""):
+        if not unique_dests:
+            st.info("No destinations to plot.")
+            return
 
-    points = (
-        pd.DataFrame({"Dest": unique_dests})
-        .merge(airports_df, on="Dest", how="left")
-        .dropna(subset=["Lat", "Long"])
-    )
+        airports_df = load_airports(IATA_LATLONG_CSV)
 
-    if points.empty:
-        st.info("No coordinates available for current selection.")
-        return
+        points = (
+            pd.DataFrame({"Dest": unique_dests})
+            .merge(airports_df, on="Dest", how="left")
+            .dropna(subset=["Lat", "Long"])
+        )
 
-    deck = pdk.Deck(
-        layers=[
-            pdk.Layer(
-                "ScatterplotLayer",
-                data=points,
-                get_position="[Long, Lat]",
-                get_radius=80000,
-                get_fill_color=[0, 120, 220, 160],
-                pickable=True,
+        if points.empty:
+            st.info("No coordinates available for current selection.")
+            return
+
+        deck = pdk.Deck(
+            layers=[
+                pdk.Layer(
+                    "ScatterplotLayer",
+                    data=points,
+                    get_position="[Long, Lat]",
+                    get_radius=80000,
+                    get_fill_color=[0, 120, 220, 160],
+                    pickable=True,
+                )
+            ],
+            initial_view_state=pdk.ViewState(
+                latitude=float(points["Lat"].mean()) if not points["Lat"].isna().all() else 39.0,
+                longitude=float(points["Long"].mean()) if not points["Long"].isna().all() else -98.0,
+                zoom=3,
+                pitch=0,
+                bearing=0,
+            ),
+            tooltip={"text": "Destination: {Dest}"},
+            map_provider="mapbox",
+            map_style=None,
+        )
+        st.pydeck_chart(deck, use_container_width=True)
+    
+    render_map(unique_list)
+
+# TAB 2: Fleet by Month view
+with tab2:
+    st.subheader("Fleet Destinations by Month")
+    
+    # Get available months from data
+    data_with_dates = data.copy()
+    data_with_dates["Eff Date"] = parse_any_date(data_with_dates["Eff Date"])
+    data_with_dates["Term Date"] = parse_any_date(data_with_dates["Term Date"])
+    
+    # Extract all year-month combinations from eff and term dates
+    all_months = set()
+    
+    if not data_with_dates.empty:
+        for _, row in data_with_dates.iterrows():
+            eff = row["Eff Date"]
+            term = row["Term Date"]
+            
+            if pd.notna(eff) and pd.notna(term):
+                # Get all months between eff and term
+                current = eff
+                while current <= term:
+                    all_months.add(current.strftime("%Y-%m"))
+                    # Move to next month
+                    if current.month == 12:
+                        current = current.replace(year=current.year + 1, month=1)
+                    else:
+                        current = current.replace(month=current.month + 1)
+    
+    available_months = sorted(list(all_months), reverse=True)
+    
+    if not available_months:
+        st.warning("No date data available in the database.")
+    else:
+        # Create two columns for selectors
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            selected_month = st.selectbox(
+                "Select Month",
+                options=available_months,
+                format_func=lambda x: datetime.strptime(x, "%Y-%m").strftime("%B %Y")
             )
-        ],
-        initial_view_state=pdk.ViewState(
-            latitude=float(points["Lat"].mean()) if not points["Lat"].isna().all() else 39.0,
-            longitude=float(points["Long"].mean()) if not points["Long"].isna().all() else -98.0,
-            zoom=3,
-            pitch=0,
-            bearing=0,
-        ),
-        tooltip={"text": "Destination: {Dest}"},
-        map_provider="mapbox",
-        map_style=None,
-    )
-    st.pydeck_chart(deck)
-
-render_map(unique_list)
+        
+        with col2:
+            # Add Fleet filter with All option
+            fleet_options = ["All"] + FLEET_ALLOWED
+            selected_fleet = st.selectbox("Select Fleet", options=fleet_options)
+        
+        # Filter data by selected month
+        if selected_month:
+            year, month = map(int, selected_month.split("-"))
+            month_start = datetime(year, month, 1)
+            
+            # Get last day of month
+            if month == 12:
+                month_end = datetime(year + 1, 1, 1) - pd.Timedelta(days=1)
+            else:
+                month_end = datetime(year, month + 1, 1) - pd.Timedelta(days=1)
+            
+            # Filter: any route active during this month
+            month_df = data_with_dates[
+                (data_with_dates["Eff Date"] <= month_end) &
+                (data_with_dates["Term Date"] >= month_start)
+            ].copy()
+            
+            # Add Fleet column
+            month_df["Fleet"] = month_df["EQPT"].apply(map_to_fleet)
+            
+            # Filter by fleet if not "All"
+            if selected_fleet != "All":
+                month_df = month_df[month_df["Fleet"] == selected_fleet]
+            
+            # Get unique destinations
+            month_dests = month_df["Dest"].dropna().astype(str).unique().tolist()
+            
+            # Display info
+            fleet_text = selected_fleet if selected_fleet != "All" else "All Fleets"
+            month_text = datetime.strptime(selected_month, "%Y-%m").strftime("%B %Y")
+            
+            st.write(f"**{fleet_text}** flying to **{len(month_dests)} destinations** in **{month_text}**")
+            
+            # Render map
+            render_map(month_dests)
