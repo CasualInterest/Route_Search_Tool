@@ -159,7 +159,7 @@ def map_to_fleet(eqpt: str) -> str:
         return "764"
     if s.startswith("33")or "A330" in s:
         return "330"
-    if "350" in s or "A350" in s or if s.startswith("35"):
+    if "350" in s or "A350" in s or s.startswith("35"):
         return "350"
     if "717" in s:
         return "717"
