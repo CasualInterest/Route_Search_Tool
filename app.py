@@ -157,7 +157,7 @@ def map_to_fleet(eqpt: str) -> str:
         return "757/767"
     if "764" in s:
         return "764"
-    if "330" in s or "A330" in s or "33" in s:
+    if "332" in s or "A330" in s or "33" in s:
         return "330"
     if "350" in s or "A350" in s or "35" in s:
         return "350"
