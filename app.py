@@ -147,9 +147,9 @@ def map_to_fleet(eqpt: str) -> str:
         return "Other"
     s = str(eqpt).strip().upper()
     
-    if "220" in s or "A220" in s:
+    if s.startswith("22") or "A220" in s:
         return "220"
-    if "32" in s or "A32" in s or "320" in s or "321" in s:
+    if s.startswith("32") or "A32" in s or "320" in s or "321" in s:
         return "320"
     if "737" in s or "73" in s:
         return "737"
@@ -157,9 +157,9 @@ def map_to_fleet(eqpt: str) -> str:
         return "757/767"
     if "764" in s:
         return "764"
-    if "332" in s or "A330" in s or "33" in s:
+    if s.startswith("33")or "A330" in s:
         return "330"
-    if "350" in s or "A350" in s or "35" in s:
+    if "350" in s or "A350" in s or if s.startswith("35"):
         return "350"
     if "717" in s:
         return "717"
