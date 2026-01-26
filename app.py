@@ -147,19 +147,19 @@ def map_to_fleet(eqpt: str) -> str:
         return "Other"
     s = str(eqpt).strip().upper()
     
-    if s.startswith("22") or "A220" in s:
+    if "220" in s or "A220" in s:
         return "220"
-    if s.startswith("32") or "A32" in s or "320" in s or "321" in s:
+    if "32" in s or "A32" in s or "320" in s or "321" in s:
         return "320"
     if "737" in s or "73" in s:
         return "737"
-    if  "764" in s:
-        return "764"
     if "757" in s or "767" in s or "75" in s or "76" in s:
         return "757/767"
-    if s.startswith("33")or "A330" in s:
+    if "764" in s:
+        return "764"
+    if "330" in s or "A330" in s or "33" in s:
         return "330"
-    if "350" in s or "A350" in s or s.startswith("35"):
+    if "350" in s or "A350" in s or "35" in s:
         return "350"
     if "717" in s:
         return "717"
@@ -173,14 +173,25 @@ def map_to_fleet(eqpt: str) -> str:
 
 @st.cache_data(ttl=60, show_spinner="Loading data from database...")
 def load_all_data_from_supabase() -> pd.DataFrame:
-    """Load all routes from Supabase"""
+    """Load all routes from Supabase with proper pagination"""
     try:
-        response = supabase.table(TABLE_NAME).select("*").execute()
+        # First, get the actual count
+        count_response = supabase.table(TABLE_NAME).select("*", count="exact").limit(1).execute()
+        total_rows = count_response.count
         
-        if not response.data:
+        if total_rows == 0:
             return pd.DataFrame(columns=DISPLAY_COLS)
         
-        df = pd.DataFrame(response.data)
+        # Load all data in chunks to avoid any limits
+        all_data = []
+        chunk_size = 1000  # Supabase default safe limit
+        
+        for offset in range(0, total_rows, chunk_size):
+            response = supabase.table(TABLE_NAME).select("*").range(offset, offset + chunk_size - 1).execute()
+            if response.data:
+                all_data.extend(response.data)
+        
+        df = pd.DataFrame(all_data)
         
         if "Eff Date" in df.columns:
             df["Eff Date"] = parse_any_date(df["Eff Date"])
@@ -220,29 +231,33 @@ def upload_to_supabase(df: pd.DataFrame, batch_size: int = 1000) -> bool:
         st.error(f"Upload to Supabase failed: {e}")
         return False
 
-def merge_and_upsert_to_supabase(incoming_df: pd.DataFrame) -> tuple[int, int]:
-    """Merge incoming data with existing data and upsert to Supabase"""
+def replace_all_data_in_supabase(incoming_df: pd.DataFrame) -> tuple[int, int]:
+    """FULL REPLACEMENT: Delete all existing data and upload new data"""
     try:
+        # Get count before deletion
         existing = load_all_data_from_supabase()
         rows_before = len(existing)
         
-        combined = pd.concat([existing, incoming_df], ignore_index=True)
-        combined = combined.drop_duplicates(subset=DISPLAY_COLS, keep="last")
-        combined = combined.sort_values(DISPLAY_COLS, kind="mergesort", ignore_index=True)
+        # Clean the incoming data
+        rows_after = len(incoming_df)
         
-        rows_after = len(combined)
-        
+        # Delete everything
+        st.info("🗑️ Deleting all existing data...")
         supabase.table(TABLE_NAME).delete().neq("Dest", "").execute()
-        success = upload_to_supabase(combined)
+        
+        # Upload new data
+        st.info(f"⬆️ Uploading {rows_after:,} new rows...")
+        success = upload_to_supabase(incoming_df)
         
         if success:
             st.cache_data.clear()
+            st.success(f"✅ Replaced {rows_before:,} old rows with {rows_after:,} new rows")
             return rows_before, rows_after
         else:
-            return rows_before, rows_before
+            return rows_before, 0
     
     except Exception as e:
-        st.error(f"Merge failed: {e}")
+        st.error(f"Replacement failed: {e}")
         return 0, 0
 
 def backup_to_csv() -> Path:
@@ -415,7 +430,8 @@ if mode == "🔍 Search Tool":
         total_rows = len(data)
         st.sidebar.info(f"💾 Database: {total_rows:,} rows")
         
-        with st.sidebar.expander("➕ Upload & Merge MAP files", expanded=False):
+        with st.sidebar.expander("⚠️ Upload & REPLACE All Data", expanded=False):
+            st.warning("⚠️ This will DELETE all existing data and replace with new upload!")
             uploads = st.file_uploader(
                 "Upload MAP files (.xlsx or .csv)",
                 type=["xlsx", "csv", "xls"],
@@ -424,11 +440,11 @@ if mode == "🔍 Search Tool":
             )
             
             if uploads:
-                st.caption("Files to merge:")
+                st.caption("Files to upload:")
                 for u in uploads:
                     st.write("•", u.name)
             
-            if st.button("Process & Merge", type="primary", disabled=not uploads):
+            if st.button("⚠️ REPLACE All Data", type="primary", disabled=not uploads):
                 parts, errors = [], []
                 
                 for up in uploads:
@@ -451,17 +467,17 @@ if mode == "🔍 Search Tool":
                             f"(invalid dates: {dropped_dates}, blank origin: {dropped_origin})."
                         )
                     
-                    with st.spinner("Uploading to database..."):
-                        rows_before, rows_after = merge_and_upsert_to_supabase(cleaned)
-                        delta = rows_after - rows_before
+                    with st.spinner("Replacing all data in database..."):
+                        rows_before, rows_after = replace_all_data_in_supabase(cleaned)
                         
                         st.sidebar.success(
-                            f"✅ Merge complete!\n"
-                            f"Rows: {rows_before:,} → {rows_after:,} (Δ {delta:+,})"
+                            f"✅ Replacement complete!\n"
+                            f"Deleted: {rows_before:,} old rows\n"
+                            f"Uploaded: {rows_after:,} new rows"
                         )
                         st.rerun()
                 else:
-                    st.sidebar.warning("No valid rows found to merge.")
+                    st.sidebar.warning("No valid rows found to upload.")
         
         st.sidebar.markdown("---")
         st.sidebar.subheader("Maintenance")
@@ -503,33 +519,47 @@ if mode == "🔍 Search Tool":
                 st.rerun()
     
     # Filtering logic
-    df = data.copy()
-    sel_ts = pd.Timestamp(sel_date)
+    # Check if any filters are selected (besides date)
+    has_filters = (
+        len(sel_dests) > 0 or 
+        len(sel_origs) > 0 or 
+        len(sel_fleets) > 0 or 
+        len(sel_eqpts) > 0
+    )
+    
+    if not has_filters:
+        # Show empty state with message
+        st.info("👈 Please select at least one filter (Dest, Origin, Fleet, or EQPT) to view results.")
+        df = pd.DataFrame(columns=DISPLAY_COLS + ["Fleet"])
+    else:
+        # Apply filters
+        df = data.copy()
+        sel_ts = pd.Timestamp(sel_date)
 
-    df["Fleet"] = df["EQPT"].apply(map_to_fleet)
+        df["Fleet"] = df["EQPT"].apply(map_to_fleet)
 
-    if "Eff Date" in df.columns and "Term Date" in df.columns:
-        df["Eff Date"] = parse_any_date(df["Eff Date"])
-        df["Term Date"] = parse_any_date(df["Term Date"])
-        mask_date = (
-            (df["Eff Date"].notna())
-            & (df["Term Date"].notna())
-            & (df["Eff Date"] <= sel_ts)
-            & (df["Term Date"] >= sel_ts)
-        )
-        df = df[mask_date]
+        if "Eff Date" in df.columns and "Term Date" in df.columns:
+            df["Eff Date"] = parse_any_date(df["Eff Date"])
+            df["Term Date"] = parse_any_date(df["Term Date"])
+            mask_date = (
+                (df["Eff Date"].notna())
+                & (df["Term Date"].notna())
+                & (df["Eff Date"] <= sel_ts)
+                & (df["Term Date"] >= sel_ts)
+            )
+            df = df[mask_date]
 
-        df["Eff Date"] = df["Eff Date"].dt.strftime("%Y-%m-%d")
-        df["Term Date"] = df["Term Date"].dt.strftime("%Y-%m-%d")
+            df["Eff Date"] = df["Eff Date"].dt.strftime("%Y-%m-%d")
+            df["Term Date"] = df["Term Date"].dt.strftime("%Y-%m-%d")
 
-    if len(sel_dests) > 0:
-        df = df[df["Dest"].astype(str).isin(sel_dests)]
-    if len(sel_origs) > 0:
-        df = df[df["Origin"].astype(str).isin(sel_origs)]
-    if len(sel_fleets) > 0:
-        df = df[df["Fleet"].isin(sel_fleets)]
-    if len(sel_eqpts) > 0:
-        df = df[df["EQPT"].astype(str).isin(sel_eqpts)]
+        if len(sel_dests) > 0:
+            df = df[df["Dest"].astype(str).isin(sel_dests)]
+        if len(sel_origs) > 0:
+            df = df[df["Origin"].astype(str).isin(sel_origs)]
+        if len(sel_fleets) > 0:
+            df = df[df["Fleet"].isin(sel_fleets)]
+        if len(sel_eqpts) > 0:
+            df = df[df["EQPT"].astype(str).isin(sel_eqpts)]
 
     # Unique Destinations grid
     def render_unique_dest_table(filtered_df: pd.DataFrame, n_cols: int = 7, height: int = 220):
